@@ -44,6 +44,12 @@ export class SnowflakeService extends cds.DatabaseService {
       logInfo('Using Snowflake SDK with password authentication');
     }
 
+    // Register query handlers
+    this.on('READ', '*', this.onRead.bind(this));
+    this.on('INSERT', '*', this.onInsert.bind(this));
+    this.on('UPDATE', '*', this.onUpdate.bind(this));
+    this.on('DELETE', '*', this.onDelete.bind(this));
+
     // Call parent init
     return super.init();
   }
@@ -52,7 +58,8 @@ export class SnowflakeService extends cds.DatabaseService {
    * Handle READ operations
    * Supports expand (LEFT JOIN), temporal queries, and localized data
    */
-  async read(query: CQN): Promise<any[]> {
+  private async onRead(req: any): Promise<any[]> {
+    const query = req.query;
     try {
       const select = query.SELECT;
       
@@ -163,7 +170,8 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Handle INSERT operations
    */
-  async insert(query: CQN): Promise<any> {
+  private async onInsert(req: any): Promise<any> {
+    const query = req.query;
     try {
       const insert = query.INSERT;
       
@@ -193,7 +201,8 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Handle UPDATE operations
    */
-  async update(query: CQN): Promise<number> {
+  private async onUpdate(req: any): Promise<number> {
+    const query = req.query;
     try {
       const update = query.UPDATE;
       
@@ -219,7 +228,8 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Handle DELETE operations
    */
-  async delete(query: CQN): Promise<number> {
+  private async onDelete(req: any): Promise<number> {
+    const query = req.query;
     try {
       const del = query.DELETE;
       
@@ -246,7 +256,7 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Handle UPSERT operations (using MERGE)
    */
-  async upsert(entity: string, data: any, keys?: string[]): Promise<any> {
+  private async handleUpsert(entity: string, data: any, keys?: string[]): Promise<any> {
     try {
       if (!keys || keys.length === 0) {
         throw new Error('UPSERT requires key fields');
@@ -266,7 +276,7 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Run arbitrary SQL
    */
-  async run(sql: string, params?: any[]): Promise<any[]> {
+  private async runSQL(sql: string, params?: any[]): Promise<any[]> {
     try {
       return await this.execute(sql, params);
     } catch (error) {
@@ -372,7 +382,7 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Deploy database schema (for cds deploy)
    */
-  async deploy(model: any, options?: any): Promise<void> {
+  private async handleDeploy(model: any, options?: any): Promise<void> {
     logInfo('Deploy operation called', options);
     
     // Basic deploy support - could be extended with full DDL generation

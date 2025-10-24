@@ -35,7 +35,7 @@ export function processExpands(
   credentials: SnowflakeCredentials,
   associationMap: Map<string, AssociationInfo>,
   params: any[]
-): { sql: string; postProcess?: (rows: any[]) => any[] } {
+): { sql: string; postProcess?: (rows: any[]) => Promise<any[]> } {
   
   if (!expands || expands.length === 0) {
     return { sql: baseQuery };

@@ -17,10 +17,10 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "NODE_OPTIONS='--loader tsx' mocha 'test/**/*.test.ts'",
-    "test:unit": "NODE_OPTIONS='--loader tsx' mocha 'test/unit/**/*.test.ts'",
-    "test:integ": "NODE_OPTIONS='--loader tsx' mocha 'test/integ/**/*.test.ts'",
-    "lint": "eslint src --ext .ts",
+    "test": "NODE_OPTIONS='--import tsx' mocha 'test/**/*.test.ts'",
+    "test:unit": "NODE_OPTIONS='--import tsx' mocha 'test/unit/**/*.test.ts'",
+    "test:integ": "NODE_OPTIONS='--import tsx' mocha 'test/integ/**/*.test.ts'",
+    "lint": "eslint src",
     "prepublishOnly": "npm run build",
     "import-schema": "node dist/cli/import-schema.js"
   },
@@ -42,11 +42,12 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "@sap/cds": "^8.0.0",
+    "@sap/cds": ">=9.0.0",
     "jsonwebtoken": "^9.0.2",
     "snowflake-sdk": "^1.11.0"
   },
   "devDependencies": {
+    "@cap-js/cds-types": "^0.15.0",
     "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
@@ -64,4 +65,3 @@
     "kind": "snowflake"
   }
 }
-
