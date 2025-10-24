@@ -151,7 +151,7 @@ export function generateToManyAggregation(
 ): string {
   
   // Build object construction for each child row
-  let objectParts: string[] = [];
+  const objectParts: string[] = [];
   
   if (columns.length === 0 || columns.includes('*')) {
     // All columns - use OBJECT_CONSTRUCT(*)
@@ -185,7 +185,7 @@ export function restructureJoinedResults(
     for (const [key, value] of Object.entries(row)) {
       let isExpanded = false;
       
-      for (const [assocName, meta] of expansions.entries()) {
+      for (const [assocName] of expansions.entries()) {
         if (key.startsWith(`${assocName}_`)) {
           const fieldName = key.substring(assocName.length + 1);
           

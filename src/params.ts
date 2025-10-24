@@ -18,7 +18,6 @@ export function namedToPositional(
   namedParams: Record<string, any>
 ): { sql: string; params: any[] } {
   const params: any[] = [];
-  let index = 0;
 
   // Replace :paramName with ? and collect values
   const convertedSQL = sql.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, name) => {

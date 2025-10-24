@@ -70,7 +70,7 @@ export function addTemporalConditions(
   const validFrom = quoteIdentifier(temporalFields.validFrom);
   const validTo = quoteIdentifier(temporalFields.validTo);
   
-  let conditions: string[] = [];
+  const conditions: string[] = [];
   
   if (whereClause) {
     conditions.push(`(${whereClause})`);
@@ -158,7 +158,7 @@ export function generateTemporalTableDDL(
 /**
  * Import to avoid circular dependency
  */
-function mapCDSType(type: string, length?: number, precision?: number, scale?: number): string {
+function mapCDSType(type: string, length?: number, _precision?: number, _scale?: number): string {
   // Simplified type mapping (full version in ddl/types.ts)
   const normalizedType = type.replace(/^cds\./, '').toLowerCase();
   

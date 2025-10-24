@@ -6,7 +6,7 @@ import { quoteIdentifier, qualifyName } from '../identifiers.js';
 import { placeholder } from '../params.js';
 import { translateFilter } from './filters.js';
 import { translateOrderBy } from './orderby.js';
-import { translatePagination, wrapWithCount } from './pagination.js';
+import { translatePagination } from './pagination.js';
 import { SnowflakeCredentials } from '../config.js';
 
 export interface CQN {
@@ -183,7 +183,7 @@ function processColumnsWithExpand(
   columns: ColumnSpec[],
   from: FromClause,
   credentials: SnowflakeCredentials,
-  params: any[]
+  _params: any[]
 ): { baseColumns: string[]; expandColumns: string[]; joins: string[] } {
   
   const baseColumns: string[] = [];

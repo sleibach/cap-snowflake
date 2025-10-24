@@ -6,7 +6,6 @@
 import { quoteIdentifier, qualifyName } from '../identifiers.js';
 import { SnowflakeCredentials } from '../config.js';
 import { translateFilter } from './filters.js';
-import { translateOrderBy } from './orderby.js';
 
 export interface ExpandSpec {
   ref: string[];
@@ -93,7 +92,7 @@ function addToOneJoins(
 
   const baseAlias = fromMatch[2] || 'base';
   let joins = '';
-  let additionalColumns: string[] = [];
+  const additionalColumns: string[] = [];
 
   for (const expand of expands) {
     const assocName = expand.ref[expand.ref.length - 1];
@@ -162,9 +161,9 @@ function addToOneJoins(
  */
 async function postProcessToMany(
   rows: any[],
-  expands: ExpandSpec[],
-  associationMap: Map<string, AssociationInfo>,
-  credentials: SnowflakeCredentials
+  _expands: ExpandSpec[],
+  _associationMap: Map<string, AssociationInfo>,
+  _credentials: SnowflakeCredentials
 ): Promise<any[]> {
   
   // This would require database access, so return rows as-is
@@ -250,20 +249,15 @@ export function generateToManyExpand(
   expandColumns?: string[]
 ): string {
   
-  const childTable = qualifyName(association.target, credentials);
-  const childAlias = 'child';
+  // Note: This function builds an ARRAY_AGG aggregation for inline associations
+  // The childTable and joinCondition would be needed for a full implementation
+  // but for now we use a simplified OBJECT_CONSTRUCT approach
   
-  // Build join condition
-  let joinCondition: string;
-  
-  if (association.on) {
-    // Unmanaged: use ON condition
-    joinCondition = '1=1';  // Simplified - would need full translation
-  } else {
-    // Assume backlink pattern: child.parent_ID = parent.ID
-    const backlink = `${parentTable.toLowerCase()}_ID`;
-    joinCondition = `${childAlias}.${quoteIdentifier(backlink)} = ${parentAlias}.ID`;
-  }
+  // Suppress unused variable warnings for parameters that will be needed in future implementation
+  void association;
+  void credentials;
+  void parentTable;
+  void parentAlias;
   
   // Select columns to include
   const columns = expandColumns && expandColumns.length > 0

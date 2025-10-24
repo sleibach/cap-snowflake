@@ -50,7 +50,7 @@ export class SnowflakeSDKClient {
 
       this.connection = snowflake.createConnection(options);
 
-      this.connection.connect((err, conn) => {
+      this.connection.connect((err, _conn) => {
         if (err) {
           logError('Failed to connect to Snowflake', err);
           this.connection = undefined;

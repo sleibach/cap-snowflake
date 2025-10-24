@@ -4,14 +4,12 @@
 
 import cds from '@sap/cds';
 import { getSnowflakeConfig, SnowflakeCredentials } from './config.js';
-import { SnowflakeSQLAPIClient, SQLAPIResult } from './client/sqlapi.js';
-import { SnowflakeSDKClient, SDKResult } from './client/sdk.js';
-import { cqnToSQL, generateMerge, CQN } from './cqn/toSQL.js';
+import { SnowflakeSQLAPIClient } from './client/sqlapi.js';
+import { SnowflakeSDKClient } from './client/sdk.js';
+import { cqnToSQL, generateMerge } from './cqn/toSQL.js';
 import { wrapWithCount } from './cqn/pagination.js';
 import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
-import { isTemporal, getTemporalFields, addTemporalConditions } from './features/temporal.js';
-import { hasLocalizedElements, extractLocalizedElements, getEntityKeys } from './features/localized.js';
 
 export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
@@ -71,7 +69,7 @@ export class SnowflakeService extends cds.DatabaseService {
       const needsCount = select.count;
 
       // Translate to SQL (now with JOIN-based expand support)
-      let { sql, params } = cqnToSQL(query, this.credentials);
+      const { sql, params } = cqnToSQL(query, this.credentials);
       
       // Execute query
       let rows = await this.execute(sql, params);
