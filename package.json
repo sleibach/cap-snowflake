@@ -34,7 +34,10 @@
     "snowflake",
     "database",
     "adapter",
-    "odata"
+    "odata",
+    "schema-introspection",
+    "reverse-engineering",
+    "annotations"
   ],
   "author": "",
   "license": "Apache-2.0",

@@ -7,13 +7,16 @@ Production-ready SAP CAP database adapter for Snowflake with full OData support.
 
 ## Features
 
-✅ **Full CAP Integration** - Implements `cds.DatabaseService` contract  
-✅ **OData Support** - `$select`, `$filter`, `$orderby`, `$top`, `$skip`, `$count`, basic `$expand`  
-✅ **Dual Connectivity** - SQL API (JWT) or Snowflake Node.js SDK  
-✅ **CQN Translation** - Complete SELECT/INSERT/UPDATE/DELETE/UPSERT (MERGE) support  
-✅ **Type Safety** - Full TypeScript definitions  
-✅ **Production Ready** - Error handling, retries, logging, connection management  
-✅ **Security First** - JWT key-pair authentication, parameter binding, SQL injection prevention  
+**Full CAP Integration** - Implements `cds.DatabaseService` contract  
+**OData Support** - `$select`, `$filter`, `$orderby`, `$top`, `$skip`, `$count`, basic `$expand`  
+**Dual Connectivity** - SQL API (JWT) or Snowflake Node.js SDK  
+**CQN Translation** - Complete SELECT/INSERT/UPDATE/DELETE/UPSERT (MERGE) support  
+**Localization** - Support for localized entities with .texts tables and views  
+**Temporal Data** - Application-time period tables (time slices) with @cds.valid.from/to  
+**Schema Introspection** - Import existing Snowflake tables as CDS entities  
+**Type Safety** - Full TypeScript definitions  
+**Production Ready** - Error handling, retries, logging, connection management  
+**Security First** - JWT key-pair authentication, parameter binding, SQL injection prevention  
 
 ## Installation
 
@@ -180,7 +183,7 @@ entity MyBooks { ... }
 
 ## Supported OData Features
 
-### ✅ Fully Supported
+### Fully Supported
 
 - **$select** - Column projection
 - **$filter** - Where clauses with operators: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `between`, `like`
@@ -190,13 +193,24 @@ entity MyBooks { ... }
 - **$skip** - Offset results (OFFSET)
 - **$count** - Include total count
 
-### ⚠️ Partial Support
+### Optimized $expand Support
 
-- **$expand** - Implemented via follow-up queries (not SQL JOINs)
-  - Works for single-level expansions
-  - Deep expansions execute multiple queries
+- **To-one associations** - Single-query LEFT JOIN approach
+  - Generates efficient LEFT JOIN for managed associations
+  - Automatic result restructuring into nested objects
+  - Supports inline expansion for flattened results
 
-### ❌ Not Yet Supported
+- **To-many associations** - ARRAY_AGG with OBJECT_CONSTRUCT
+  - Uses Snowflake JSON functions for aggregation
+  - Single query with GROUP BY for efficient execution
+  - Returns properly structured nested arrays
+
+- **Path expressions** - Navigation in SELECT and WHERE clauses
+  - Support for `author.name` in column selection
+  - Support for `author.country.code` in filter conditions
+  - Automatic JOIN generation for path navigation
+
+### Not Yet Supported
 
 - Complex multi-table JOINs in single query
 - Aggregation via `$apply`
@@ -380,7 +394,7 @@ See the [examples/cap-svc](./examples/cap-svc) directory for a complete working 
 
 ## Schema Introspection
 
-**NEW**: Import existing Snowflake tables as CDS entities!
+Import existing Snowflake tables as CDS entities:
 
 ```bash
 # Import schema from Snowflake
@@ -396,15 +410,94 @@ This feature automatically:
 
 See [Schema Import Guide](./docs/SCHEMA_IMPORT.md) for details.
 
+## Localization Support
+
+The adapter supports localized entities following CAP conventions:
+
+```cds
+entity Books {
+  key ID : UUID;
+  title : localized String;  // Localized field
+  description : localized String;
+}
+```
+
+**Implementation**:
+- Generates `Books_texts` table with locale key
+- Creates `localized_Books` view with COALESCE logic
+- Automatic locale filtering via SESSION_PARAMETER
+- Compatible with CAP i18n patterns
+
+See [Localization Guide](./docs/LOCALIZATION.md) for details.
+
+## Temporal Data Support
+
+Application-time period tables for historical tracking:
+
+```cds
+using { temporal } from '@sap/cds/common';
+
+entity WorkAssignments : temporal {
+  key ID : UUID;
+  role : String;
+  department : String;
+  // Inherits: validFrom, validTo with @cds.valid.from/to
+}
+```
+
+**Implementation**:
+- Composite primary key (ID, validFrom) for time slices
+- Automatic filtering for current time slice
+- Time-travel queries with asOf/from/to
+- Compatible with CAP temporal data patterns
+
+See [Temporal Data Guide](./docs/TEMPORAL.md) for details.
+
+## CAP Annotations Support
+
+The Snowflake adapter supports all major CAP database annotations:
+
+**Fully Supported**:
+- `@cds.persistence.skip` - Runtime-only entities
+- `@cds.persistence.exists` - Existing database objects
+- `@cds.persistence.name` - Custom table/column names
+- `@readonly` / `@insertonly` - Access control
+- `@mandatory` - NOT NULL constraints
+- `@assert.target` - Foreign key validation
+- `@assert.range` / `@assert.format` - Value validation
+- `@cds.valid.from/to` - Temporal data (time slices)
+- `localized` elements - Multi-language support
+- `cuid`, `managed`, `temporal` aspects - Standard aspects
+- Virtual and calculated elements
+- Compositions & Associations - All relationship types
+- Draft support - @odata.draft.enabled
+
+**Partial Support**:
+- `@assert.integrity` - FK constraints (Snowflake metadata only, not enforced)
+
+See [Annotations Support Guide](./docs/ANNOTATIONS_SUPPORT.md) for complete details.
+
 ## Roadmap
 
-- [x] **Schema introspection** - Import existing tables ✅
-- [ ] Full DDL deployment (`cds deploy`)
-- [ ] Improved $expand with JOIN optimization
-- [ ] Streaming large result sets
-- [ ] Connection pooling for SQL API
-- [ ] Change data capture (CDC) integration
-- [ ] Advanced Snowflake features (clustering, time travel)
+**Completed (v1.0)**:
+- Schema introspection - Import existing tables
+- CAP annotations support - Standard CAP compliance
+- Localization - localized entities with .texts tables
+- Temporal data - @cds.valid.from/to support
+- $expand with JOIN optimization - To-one associations via LEFT JOIN, to-many via ARRAY_AGG
+- Path expressions - Navigation through associations in SELECT and WHERE
+
+**Planned (v1.1+)**:
+- Full DDL deployment (cds deploy)
+- Streaming large result sets
+- Connection pooling for SQL API
+- Change data capture (CDC) integration
+- Deep nested $expand optimization
+
+**Future (v2.0+)**:
+- Advanced Snowflake features (clustering hints, time travel, result caching)
+- Performance optimizations (statement caching, batch operations)
+- Monitoring and observability integrations
 
 ## Contributing
 

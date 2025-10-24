@@ -100,16 +100,38 @@ function translateSelect(select: SelectCQN, credentials: SnowflakeCredentials, p
     sql += ' DISTINCT';
   }
 
+  // Check for expansions
+  const hasExpansions = select.columns?.some(col => 
+    (col as any).expand || (col as any).inline
+  );
+
   // Columns
   if (select.columns && select.columns.length > 0) {
-    const cols = select.columns.map(col => translateColumn(col)).join(', ');
-    sql += ` ${cols}`;
+    if (hasExpansions) {
+      // Handle expansions with JOINs
+      const { baseColumns, expandColumns, joins } = processColumnsWithExpand(
+        select.columns,
+        select.from,
+        credentials,
+        params
+      );
+      
+      const cols = [...baseColumns, ...expandColumns].join(', ');
+      sql += ` ${cols}`;
+      
+      // FROM with joins
+      sql += ` FROM ${translateFrom(select.from, credentials)}`;
+      sql += joins.join(' ');
+    } else {
+      // Regular columns
+      const cols = select.columns.map(col => translateColumn(col)).join(', ');
+      sql += ` ${cols}`;
+      sql += ` FROM ${translateFrom(select.from, credentials)}`;
+    }
   } else {
     sql += ' *';
+    sql += ` FROM ${translateFrom(select.from, credentials)}`;
   }
-
-  // FROM
-  sql += ` FROM ${translateFrom(select.from, credentials)}`;
 
   // WHERE
   if (select.where && select.where.length > 0) {
@@ -152,6 +174,76 @@ function translateSelect(select: SelectCQN, credentials: SnowflakeCredentials, p
   }
 
   return { sql, params };
+}
+
+/**
+ * Process columns with expand/inline specifications
+ */
+function processColumnsWithExpand(
+  columns: ColumnSpec[],
+  from: FromClause,
+  credentials: SnowflakeCredentials,
+  params: any[]
+): { baseColumns: string[]; expandColumns: string[]; joins: string[] } {
+  
+  const baseColumns: string[] = [];
+  const expandColumns: string[] = [];
+  const joins: string[] = [];
+  
+  const baseAlias = from.as || 'base';
+  let joinCounter = 0;
+  
+  for (const col of columns) {
+    if ((col as any).expand) {
+      // To-one expansion: use LEFT JOIN
+      const assocName = (col.ref as string[])[0];
+      const joinAlias = `expand_${joinCounter++}`;
+      
+      // Assume managed association with {assocName}_ID foreign key
+      const foreignKey = `${assocName}_ID`;
+      const targetEntity = assocName.charAt(0).toUpperCase() + assocName.slice(1);
+      const targetTable = qualifyName(targetEntity, credentials);
+      
+      const joinSQL = `LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${quoteIdentifier(foreignKey)} = ${joinAlias}.ID`;
+      joins.push(joinSQL);
+      
+      // Add expanded columns
+      const expandSpec = (col as any).expand as ColumnSpec[];
+      for (const expandCol of expandSpec) {
+        if (expandCol.ref) {
+          const colName = expandCol.ref[expandCol.ref.length - 1];
+          const alias = `${assocName}_${colName}`;
+          expandColumns.push(`${joinAlias}.${quoteIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+        }
+      }
+    } else if ((col as any).inline) {
+      // Inline expansion: similar to expand but flattens structure
+      const assocName = (col.ref as string[])[0];
+      const joinAlias = `inline_${joinCounter++}`;
+      
+      const foreignKey = `${assocName}_ID`;
+      const targetEntity = assocName.charAt(0).toUpperCase() + assocName.slice(1);
+      const targetTable = qualifyName(targetEntity, credentials);
+      
+      const joinSQL = `LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${quoteIdentifier(foreignKey)} = ${joinAlias}.ID`;
+      joins.push(joinSQL);
+      
+      // Add inlined columns (flattened, no prefix)
+      const inlineSpec = (col as any).inline as ColumnSpec[];
+      for (const inlineCol of inlineSpec) {
+        if (inlineCol.ref) {
+          const colName = inlineCol.ref[inlineCol.ref.length - 1];
+          const alias = inlineCol.as || `${assocName}_${colName}`;
+          expandColumns.push(`${joinAlias}.${quoteIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+        }
+      }
+    } else {
+      // Regular column
+      baseColumns.push(translateColumn(col));
+    }
+  }
+  
+  return { baseColumns, expandColumns, joins };
 }
 
 /**

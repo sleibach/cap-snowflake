@@ -190,7 +190,20 @@ Complete guide for schema introspection:
 - Advanced features (filtering, custom mapping)
 - Troubleshooting introspection issues
 
-### 8. CODE_REVIEW.md (New)
+### 8. ANNOTATIONS_SUPPORT.md (New)
+Complete CAP annotations reference:
+- Persistence annotations (@cds.persistence.*)
+- Entity capability annotations (@readonly, @insertonly)
+- Validation annotations (@mandatory, @assert.*)
+- Temporal data annotations (@cds.valid.from/to)
+- Localization support (localized)
+- Managed aspects (cuid, managed, temporal)
+- Virtual and calculated elements
+- Draft annotations
+- Composition and association handling
+- Best practices and migration guide
+
+### 9. CODE_REVIEW.md (New)
 Comprehensive 150 IQ technical review:
 - Architecture analysis (10/10)
 - Code quality assessment (9.5/10)

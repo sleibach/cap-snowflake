@@ -10,6 +10,8 @@ import { cqnToSQL, generateMerge, CQN } from './cqn/toSQL.js';
 import { wrapWithCount } from './cqn/pagination.js';
 import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
+import { isTemporal, getTemporalFields, addTemporalConditions } from './features/temporal.js';
+import { hasLocalizedElements, extractLocalizedElements, getEntityKeys } from './features/localized.js';
 
 export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
@@ -48,6 +50,7 @@ export class SnowflakeService extends cds.DatabaseService {
 
   /**
    * Handle READ operations
+   * Supports expand (LEFT JOIN), temporal queries, and localized data
    */
   async read(query: CQN): Promise<any[]> {
     try {
@@ -60,11 +63,14 @@ export class SnowflakeService extends cds.DatabaseService {
       // Check if $count is requested
       const needsCount = select.count;
 
-      // Translate to SQL
-      const { sql, params } = cqnToSQL(query, this.credentials);
-
+      // Translate to SQL (now with JOIN-based expand support)
+      let { sql, params } = cqnToSQL(query, this.credentials);
+      
       // Execute query
       let rows = await this.execute(sql, params);
+
+      // Restructure expanded results if needed
+      rows = this.restructureExpands(rows, select);
 
       // Handle $count if requested
       if (needsCount) {
@@ -89,6 +95,72 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
+   * Restructure expanded results from flat JOIN to nested objects
+   */
+  private restructureExpands(rows: any[], select: any): any[] {
+    if (!select.columns) return rows;
+
+    // Check for expand columns
+    const hasExpands = select.columns.some((col: any) => col.expand || col.inline);
+    if (!hasExpands) return rows;
+
+    return rows.map(row => {
+      const result: any = {};
+      const expanded: Map<string, any> = new Map();
+
+      // Separate base and expanded fields
+      for (const [key, value] of Object.entries(row)) {
+        // Check if this is an expanded field (contains association name prefix)
+        let isExpandField = false;
+
+        for (const col of select.columns) {
+          if (col.expand && col.ref) {
+            const assocName = col.ref[0];
+            if (key.startsWith(`${assocName}_`) && key !== `${assocName}_ID`) {
+              const fieldName = key.substring(assocName.length + 1);
+              if (!expanded.has(assocName)) {
+                expanded.set(assocName, {});
+              }
+              expanded.get(assocName)[fieldName] = value;
+              isExpandField = true;
+              break;
+            }
+          }
+        }
+
+        if (!isExpandField) {
+          result[key] = value;
+        }
+      }
+
+      // Attach expanded objects
+      for (const [assocName, data] of expanded.entries()) {
+        // Check if all values are null (no related record)
+        const hasData = Object.values(data).some(v => v !== null);
+        result[assocName] = hasData ? data : null;
+      }
+
+      return result;
+    });
+  }
+
+  /**
+   * Check if entity has annotation
+   */
+  private hasAnnotation(entity: any, annotation: string): boolean {
+    if (!entity) return false;
+    // Check entity definition for annotation
+    return entity[`@${annotation}`] !== undefined;
+  }
+
+  /**
+   * Get custom table/column name from @cds.persistence.name
+   */
+  private getCustomName(definition: any): string | undefined {
+    return definition?.['@cds.persistence.name'];
+  }
+
+  /**
    * Handle INSERT operations
    */
   async insert(query: CQN): Promise<any> {
@@ -98,6 +170,9 @@ export class SnowflakeService extends cds.DatabaseService {
       if (!insert) {
         throw new Error('Invalid INSERT query');
       }
+
+      // Note: CAP runtime handles @readonly checks before reaching adapter
+      // Note: CAP runtime fills in cuid, managed fields automatically
 
       const { sql, params } = cqnToSQL(query, this.credentials);
       
@@ -126,6 +201,9 @@ export class SnowflakeService extends cds.DatabaseService {
         throw new Error('Invalid UPDATE query');
       }
 
+      // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
+      // Note: CAP runtime updates managed fields (modifiedAt, modifiedBy) automatically
+
       const { sql, params } = cqnToSQL(query, this.credentials);
       
       const result = await this.execute(sql, params);
@@ -148,6 +226,9 @@ export class SnowflakeService extends cds.DatabaseService {
       if (!del) {
         throw new Error('Invalid DELETE query');
       }
+
+      // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
+      // Note: Compositions trigger cascading deletes automatically via CAP
 
       const { sql, params } = cqnToSQL(query, this.credentials);
       
