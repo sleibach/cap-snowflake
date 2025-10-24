@@ -1,14 +1,14 @@
 # cap-snowflake - Deliverables Summary
 
-## ✅ Complete Implementation
+## Implementation Status
 
 Production-ready SAP CAP database adapter for Snowflake with full OData support.
 
 ---
 
-## 📦 Core Package Components
+## Core Package Components
 
-### 1. **Service Implementation** ✅
+### 1. Service Implementation
 - **SnowflakeService.ts** - Extends `cds.DatabaseService`
 - Implements all CAP database operations:
   - `read()` - SELECT with full OData support
@@ -20,7 +20,7 @@ Production-ready SAP CAP database adapter for Snowflake with full OData support.
 - Transaction support (begin/commit/rollback)
 - Error handling and normalization
 
-### 2. **CQN to SQL Translation** ✅
+### 2. CQN to SQL Translation
 Complete translator supporting:
 - **SELECT**: columns, FROM, WHERE, ORDER BY, LIMIT/OFFSET, DISTINCT, COUNT, GROUP BY, HAVING
 - **INSERT**: single/bulk entries, columns + values
@@ -34,7 +34,7 @@ Complete translator supporting:
 - `cqn/orderby.ts` - Sorting with NULLS handling
 - `cqn/pagination.ts` - LIMIT/OFFSET and $count
 
-### 3. **Dual Connectivity** ✅
+### 3. Dual Connectivity
 Two interchangeable backends:
 
 **SQL API Client** (`client/sqlapi.ts`):
@@ -51,40 +51,40 @@ Two interchangeable backends:
 - Password authentication
 - Better for dedicated environments
 
-### 4. **Authentication** ✅
+### 4. Authentication
 **JWT Implementation** (`auth/jwt.ts`):
 - RS256 signing with PEM private keys
 - Configurable claims (iss, sub, aud, exp)
 - Passphrase support for encrypted keys
 - Automatic token generation
 
-### 5. **Type System** ✅
+### 5. Type System
 Bidirectional mapping (`ddl/types.ts`):
 - 15+ CDS type mappings to Snowflake
 - Reverse engineering support
 - Value conversion at runtime
 - Configurable precision/scale
 
-### 6. **Identifier Handling** ✅
+### 6. Identifier Handling
 Smart quoting system (`identifiers.ts`):
 - Automatic quoting for mixed-case/reserved words
 - Schema/database qualification
 - Case preservation
 - Reserved word detection
 
-### 7. **Configuration** ✅
+### 7. Configuration
 Environment-aware config (`config.ts`):
 - Parse from `cds.env.requires.db`
 - Environment variable substitution
 - Validation and defaults
 - Support for BTP destinations
 
-### 8. **Utilities** ✅
+### 8. Utilities
 - **logger.ts** - CAP logging integration
 - **errors.ts** - Error normalization with HTTP status codes
 - **params.ts** - Parameter binding and SQL injection prevention
 
-### 9. **Schema Introspection** ✅ NEW
+### 9. Schema Introspection (New)
 **Reverse engineering from Snowflake** (`introspect/schema.ts`):
 - Query INFORMATION_SCHEMA for tables, columns, constraints
 - Generate CDS entity definitions from existing tables
@@ -100,9 +100,9 @@ Environment-aware config (`config.ts`):
 
 ---
 
-## 🧪 Test Suite
+## Test Suite
 
-### Unit Tests ✅
+### Unit Tests
 - **identifiers.test.ts** - Quoting and qualification logic
 - **types.test.ts** - Type mapping in both directions
 - **cqn-filters.test.ts** - Filter expression translation
@@ -111,7 +111,7 @@ Environment-aware config (`config.ts`):
 
 **Coverage**: Core logic comprehensively tested
 
-### Integration Tests ✅
+### Integration Tests
 - **snowflake.test.ts** - Real Snowflake database tests
   - Connection establishment
   - CRUD operations
@@ -123,9 +123,9 @@ Environment-aware config (`config.ts`):
 
 ---
 
-## 📚 Documentation
+## Documentation
 
-### 1. **README.md** ✅
+### 1. README.md
 Complete documentation including:
 - Features and capabilities
 - Installation and quick start
@@ -141,10 +141,10 @@ Complete documentation including:
 - Limitations and roadmap
 - Troubleshooting guide
 
-### 2. **QUICKSTART.md** ✅
+### 2. QUICKSTART.md
 5-minute getting started guide
 
-### 3. **SETUP_GUIDE.md** ✅
+### 3. SETUP_GUIDE.md
 Complete Snowflake setup:
 - User and role creation
 - Permissions configuration
@@ -156,7 +156,7 @@ Complete Snowflake setup:
 - Production checklist
 - BTP integration
 
-### 4. **PROJECT_STRUCTURE.md** ✅
+### 4. PROJECT_STRUCTURE.md
 Detailed project overview:
 - Directory tree
 - Component descriptions
@@ -167,7 +167,7 @@ Detailed project overview:
 - Testing strategy
 - Performance considerations
 
-### 5. **CONTRIBUTING.md** ✅
+### 5. CONTRIBUTING.md 
 Contribution guidelines:
 - Code of conduct
 - Bug reporting
@@ -177,10 +177,10 @@ Contribution guidelines:
 - Code style
 - Testing requirements
 
-### 6. **CHANGELOG.md** ✅
+### 6. CHANGELOG.md 
 Version history and release notes
 
-### 7. **SCHEMA_IMPORT.md** ✅ NEW
+### 7. SCHEMA_IMPORT.md (New)
 Complete guide for schema introspection:
 - CLI usage and options
 - Type mapping during import
@@ -190,7 +190,7 @@ Complete guide for schema introspection:
 - Advanced features (filtering, custom mapping)
 - Troubleshooting introspection issues
 
-### 8. **CODE_REVIEW.md** ✅ NEW
+### 8. CODE_REVIEW.md (New)
 Comprehensive 150 IQ technical review:
 - Architecture analysis (10/10)
 - Code quality assessment (9.5/10)
@@ -205,9 +205,9 @@ Comprehensive 150 IQ technical review:
 
 ---
 
-## 🎯 Example Application
+## Example Application
 
-**examples/cap-svc/** ✅
+**examples/cap-svc/** 
 
 Complete working CAP service:
 - **db/schema.cds** - Books/Authors/Orders domain model
@@ -225,16 +225,16 @@ Demonstrates:
 
 ---
 
-## 🔧 Build Configuration
+## Build Configuration
 
-### TypeScript ✅
+### TypeScript 
 - **tsconfig.json** - Strict mode, ES2022 target, ESM modules
 - Full type definitions exported
 
-### ESLint ✅
+### ESLint 
 - **eslintrc.json** - TypeScript-aware linting rules
 
-### NPM Package ✅
+### NPM Package 
 - **package.json** - Complete metadata
   - Peer dependencies: @sap/cds >=7.0.0
   - Runtime deps: jsonwebtoken, snowflake-sdk
@@ -244,9 +244,9 @@ Demonstrates:
 
 ---
 
-## 🚀 CI/CD
+## CI/CD
 
-**GitHub Actions** (`.github/workflows/ci.yml`) ✅
+**GitHub Actions** (`.github/workflows/ci.yml`) 
 - Multi-version Node.js testing (18.x, 20.x, 21.x)
 - Lint checks
 - TypeScript compilation
@@ -257,44 +257,44 @@ Demonstrates:
 
 ---
 
-## ✨ Key Features Delivered
+## Key Features Delivered
 
-### OData Support ✅
-- ✅ $select - Column projection
-- ✅ $filter - All operators (=, !=, <, <=, >, >=, in, between, like)
-- ✅ $filter functions - contains, startswith, endswith, substring, etc.
-- ✅ $orderby - Sorting with NULLS handling
-- ✅ $top - LIMIT
-- ✅ $skip - OFFSET
-- ✅ $count - Total count
-- ✅ $expand - Via follow-up queries
+### OData Support 
+- $select - Column projection
+- $filter - All operators (=, !=, <, <=, >, >=, in, between, like)
+- $filter functions - contains, startswith, endswith, substring, etc.
+- $orderby - Sorting with NULLS handling
+- $top - LIMIT
+- $skip - OFFSET
+- $count - Total count
+- $expand - Via follow-up queries
 
-### CAP Operations ✅
-- ✅ SELECT - With full WHERE/ORDER BY/LIMIT support
-- ✅ INSERT - Single and bulk
-- ✅ UPDATE - With conditions
-- ✅ DELETE - With conditions
-- ✅ UPSERT - Via Snowflake MERGE
-- ✅ Transactions - Begin/commit/rollback (SDK mode)
+### CAP Operations 
+- SELECT - With full WHERE/ORDER BY/LIMIT support
+- INSERT - Single and bulk
+- UPDATE - With conditions
+- DELETE - With conditions
+- UPSERT - Via Snowflake MERGE
+- Transactions - Begin/commit/rollback (SDK mode)
 
-### Security ✅
-- ✅ JWT key-pair authentication
-- ✅ Parameter binding (SQL injection prevention)
-- ✅ Error normalization
-- ✅ Private key never logged
-- ✅ HTTPS communication
+### Security 
+- JWT key-pair authentication
+- Parameter binding (SQL injection prevention)
+- Error normalization
+- Private key never logged
+- HTTPS communication
 
-### Developer Experience ✅
-- ✅ TypeScript with full type definitions
-- ✅ Comprehensive documentation
-- ✅ Working examples
-- ✅ Unit and integration tests
-- ✅ Clear error messages
-- ✅ Logging with debug levels
+### Developer Experience 
+- TypeScript with full type definitions
+- Comprehensive documentation
+- Working examples
+- Unit and integration tests
+- Clear error messages
+- Logging with debug levels
 
 ---
 
-## 📊 Statistics
+## Statistics
 
 - **Source Files**: 17 TypeScript modules (+schema introspection)
 - **Test Files**: 6 comprehensive test suites
@@ -307,29 +307,29 @@ Demonstrates:
 
 ---
 
-## 🎯 Acceptance Criteria - All Met ✅
+## Acceptance Criteria 
 
 ### Functional Requirements
-- ✅ READ with $filter (and/or, in, between, like), $orderby, $top/$skip, $count
-- ✅ INSERT/UPDATE/DELETE on tables, verifies affected rows
-- ✅ UPSERT via MERGE, no duplicates, updates as expected
-- ✅ Quoted names: "CamelCase" entities readable when addressed quoted
-- ✅ JSON: persist/read VARIANT from cds.Json
-- ✅ Transactions: multi-statement unit rolls back on failure (SDK mode)
-- ✅ Switch backends: flip config from SQL API to SDK, tests pass
-- ✅ **Schema introspection**: Import existing tables as CDS entities
+- READ with $filter (and/or, in, between, like), $orderby, $top/$skip, $count
+- INSERT/UPDATE/DELETE on tables, verifies affected rows
+- UPSERT via MERGE, no duplicates, updates as expected
+- Quoted names: "CamelCase" entities readable when addressed quoted
+- JSON: persist/read VARIANT from cds.Json
+- Transactions: multi-statement unit rolls back on failure (SDK mode)
+- Switch backends: flip config from SQL API to SDK, tests pass
+- **Schema introspection**: Import existing tables as CDS entities
 
 ### Quality Requirements
-- ✅ Production-ready code structure
-- ✅ Comprehensive error handling
-- ✅ Security best practices
-- ✅ Performance optimizations
-- ✅ Complete test coverage
-- ✅ Clear documentation
+- Production-ready code structure
+- Comprehensive error handling
+- Security best practices
+- Performance optimizations
+- Complete test coverage
+- Clear documentation
 
 ---
 
-## 📦 Package Ready for Publishing
+##  Package Ready for Publishing
 
 The package is ready to publish to NPM:
 
