@@ -1,0 +1,12 @@
+src/
+test/
+examples/
+.github/
+tsconfig.json
+.eslintrc.json
+*.log
+.env
+.DS_Store
+*.test.ts
+*.test.js
+

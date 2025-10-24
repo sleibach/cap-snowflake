@@ -1,0 +1,41 @@
+{
+  "name": "cap-snowflake-example",
+  "version": "1.0.0",
+  "description": "Example CAP service using Snowflake adapter",
+  "main": "index.js",
+  "scripts": {
+    "start": "cds-serve"
+  },
+  "dependencies": {
+    "@sap/cds": "^8.0.0",
+    "cap-snowflake": "file:../..",
+    "express": "^4.18.0"
+  },
+  "cds": {
+    "requires": {
+      "db": {
+        "kind": "snowflake",
+        "impl": "cap-snowflake",
+        "credentials": {
+          "account": "YOUR_ACCOUNT",
+          "host": "YOUR_ACCOUNT.snowflakecomputing.com",
+          "user": "YOUR_USER",
+          "role": "YOUR_ROLE",
+          "warehouse": "YOUR_WAREHOUSE",
+          "database": "YOUR_DATABASE",
+          "schema": "YOUR_SCHEMA",
+          "auth": "jwt",
+          "jwt": {
+            "aud": "https://YOUR_ACCOUNT.snowflakecomputing.com",
+            "issuer": "YOUR_ACCOUNT.YOUR_USER",
+            "subject": "YOUR_USER",
+            "privateKey": "env:SNOWFLAKE_PRIVATE_KEY",
+            "privateKeyPassphrase": "env:SNOWFLAKE_PASSPHRASE"
+          },
+          "timeout": 60
+        }
+      }
+    }
+  }
+}
+
