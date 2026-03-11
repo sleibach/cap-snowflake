@@ -87,7 +87,21 @@ export function isRetryableError(error: any): boolean {
   }
 
   // Connection errors
-  if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+  const code = error?.code || error?.cause?.code;
+  if (
+    code === 'ECONNREFUSED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT'
+  ) {
+    return true;
+  }
+
+  // Undici/network fetch wrappers
+  if (
+    error?.name === 'TypeError' &&
+    typeof error?.message === 'string' &&
+    error.message.includes('fetch failed')
+  ) {
     return true;
   }
 

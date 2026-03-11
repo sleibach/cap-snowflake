@@ -8,6 +8,7 @@ import { translateFilter } from './filters.js';
 import { translateOrderBy } from './orderby.js';
 import { translatePagination } from './pagination.js';
 import { SnowflakeCredentials } from '../config.js';
+import cds from '@sap/cds';
 
 export interface CQN {
   SELECT?: SelectCQN;
@@ -70,20 +71,28 @@ export interface SQLResult {
   params: any[];
 }
 
+interface TranslateContext {
+  target?: any;
+}
+
 /**
  * Main entry point: translate CQN to SQL
  */
-export function cqnToSQL(cqn: CQN, credentials: SnowflakeCredentials): SQLResult {
+export function cqnToSQL(
+  cqn: CQN,
+  credentials: SnowflakeCredentials,
+  context?: TranslateContext
+): SQLResult {
   const params: any[] = [];
 
   if (cqn.SELECT) {
-    return translateSelect(cqn.SELECT, credentials, params);
+    return translateSelect(cqn.SELECT, credentials, params, context);
   } else if (cqn.INSERT) {
-    return translateInsert(cqn.INSERT, credentials, params);
+    return translateInsert(cqn.INSERT, credentials, params, context);
   } else if (cqn.UPDATE) {
-    return translateUpdate(cqn.UPDATE, credentials, params);
+    return translateUpdate(cqn.UPDATE, credentials, params, context);
   } else if (cqn.DELETE) {
-    return translateDelete(cqn.DELETE, credentials, params);
+    return translateDelete(cqn.DELETE, credentials, params, context);
   }
 
   throw new Error('Unsupported CQN operation');
@@ -92,7 +101,12 @@ export function cqnToSQL(cqn: CQN, credentials: SnowflakeCredentials): SQLResult
 /**
  * Translate SELECT
  */
-function translateSelect(select: SelectCQN, credentials: SnowflakeCredentials, params: any[]): SQLResult {
+function translateSelect(
+  select: SelectCQN,
+  credentials: SnowflakeCredentials,
+  params: any[],
+  context?: TranslateContext
+): SQLResult {
   let sql = 'SELECT';
 
   // DISTINCT
@@ -113,24 +127,31 @@ function translateSelect(select: SelectCQN, credentials: SnowflakeCredentials, p
         select.columns,
         select.from,
         credentials,
-        params
+        params,
+        context?.target
       );
       
       const cols = [...baseColumns, ...expandColumns].join(', ');
       sql += ` ${cols}`;
       
       // FROM with joins
-      sql += ` FROM ${translateFrom(select.from, credentials)}`;
-      sql += joins.join(' ');
+      let fromClause = translateFrom(select.from, credentials, context?.target);
+      if (!select.from.as) {
+        fromClause += ' AS base';
+      }
+      sql += ` FROM ${fromClause}`;
+      if (joins.length) {
+        sql += ` ${joins.join(' ')}`;
+      }
     } else {
       // Regular columns
       const cols = select.columns.map(col => translateColumn(col)).join(', ');
       sql += ` ${cols}`;
-      sql += ` FROM ${translateFrom(select.from, credentials)}`;
+      sql += ` FROM ${translateFrom(select.from, credentials, context?.target)}`;
     }
   } else {
     sql += ' *';
-    sql += ` FROM ${translateFrom(select.from, credentials)}`;
+    sql += ` FROM ${translateFrom(select.from, credentials, context?.target)}`;
   }
 
   // WHERE
@@ -183,7 +204,8 @@ function processColumnsWithExpand(
   columns: ColumnSpec[],
   from: FromClause,
   credentials: SnowflakeCredentials,
-  _params: any[]
+  _params: any[],
+  baseTarget?: any
 ): { baseColumns: string[]; expandColumns: string[]; joins: string[] } {
   
   const baseColumns: string[] = [];
@@ -195,26 +217,35 @@ function processColumnsWithExpand(
   
   for (const col of columns) {
     if ((col as any).expand) {
-      // To-one expansion: use LEFT JOIN
       const assocName = (col.ref as string[])[0];
-      const joinAlias = `expand_${joinCounter++}`;
-      
-      // Assume managed association with {assocName}_ID foreign key
-      const foreignKey = `${assocName}_ID`;
-      const targetEntity = assocName.charAt(0).toUpperCase() + assocName.slice(1);
-      const targetTable = qualifyName(targetEntity, credentials);
-      
-      const joinSQL = `LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${quoteIdentifier(foreignKey)} = ${joinAlias}.ID`;
-      joins.push(joinSQL);
-      
-      // Add expanded columns
       const expandSpec = (col as any).expand as ColumnSpec[];
-      for (const expandCol of expandSpec) {
-        if (expandCol.ref) {
-          const colName = expandCol.ref[expandCol.ref.length - 1];
-          const alias = `${assocName}_${colName}`;
-          expandColumns.push(`${joinAlias}.${quoteIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
-        }
+
+      if (isLikelyToMany(assocName)) {
+        const targetEntity = resolveAssociationTargetName(baseTarget, assocName)
+          || (assocName.charAt(0).toUpperCase() + assocName.slice(1));
+        const targetTable = qualifyName(targetEntity, credentials);
+        const parentFK = `${singularize((from.ref || [])[0] || 'parent')}_ID`;
+        expandColumns.push(
+          `(SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*)) FROM ${targetTable} AS tm WHERE tm.${quoteIdentifier(parentFK)} = ${baseAlias}.ID) AS ${quoteIdentifier(assocName)}`
+        );
+      } else {
+        const joinAlias = `expand_${joinCounter++}`;
+        const foreignKey = `${assocName}_ID`;
+        const targetEntity = resolveAssociationTargetName(baseTarget, assocName)
+          || (assocName.charAt(0).toUpperCase() + assocName.slice(1));
+        const targetTable = qualifyName(targetEntity, credentials);
+        joins.push(`LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${toPhysicalIdentifier(foreignKey)} = ${joinAlias}.ID`);
+
+        collectNestedExpandColumns(
+          expandSpec,
+          assocName,
+          joinAlias,
+          joins,
+          expandColumns,
+          credentials,
+          () => `expand_${joinCounter++}`,
+          getDefinitionForEntity(targetEntity)
+        );
       }
     } else if ((col as any).inline) {
       // Inline expansion: similar to expand but flattens structure
@@ -222,10 +253,11 @@ function processColumnsWithExpand(
       const joinAlias = `inline_${joinCounter++}`;
       
       const foreignKey = `${assocName}_ID`;
-      const targetEntity = assocName.charAt(0).toUpperCase() + assocName.slice(1);
+      const targetEntity = resolveAssociationTargetName(baseTarget, assocName)
+        || (assocName.charAt(0).toUpperCase() + assocName.slice(1));
       const targetTable = qualifyName(targetEntity, credentials);
       
-      const joinSQL = `LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${quoteIdentifier(foreignKey)} = ${joinAlias}.ID`;
+      const joinSQL = `LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${toPhysicalIdentifier(foreignKey)} = ${joinAlias}.ID`;
       joins.push(joinSQL);
       
       // Add inlined columns (flattened, no prefix)
@@ -234,24 +266,81 @@ function processColumnsWithExpand(
         if (inlineCol.ref) {
           const colName = inlineCol.ref[inlineCol.ref.length - 1];
           const alias = inlineCol.as || `${assocName}_${colName}`;
-          expandColumns.push(`${joinAlias}.${quoteIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+          expandColumns.push(`${joinAlias}.${toPhysicalIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
         }
       }
     } else {
       // Regular column
-      baseColumns.push(translateColumn(col));
+      if (col.ref) {
+        const colName = col.ref[col.ref.length - 1];
+        const alias = col.as || colName;
+        baseColumns.push(`${baseAlias}.${toPhysicalIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+      } else {
+        baseColumns.push(translateColumn(col));
+      }
     }
   }
   
   return { baseColumns, expandColumns, joins };
 }
 
+function collectNestedExpandColumns(
+  columns: ColumnSpec[],
+  pathPrefix: string,
+  parentAlias: string,
+  joins: string[],
+  expandColumns: string[],
+  credentials: SnowflakeCredentials,
+  nextAlias: () => string,
+  parentTarget?: any
+) {
+  for (const col of columns) {
+    if (!col.ref) continue;
+    const colName = col.ref[col.ref.length - 1];
+
+    if ((col as any).expand) {
+      const nestedAssoc = colName;
+      const nestedAlias = nextAlias();
+      const nestedTarget = resolveAssociationTargetName(parentTarget, nestedAssoc)
+        || (nestedAssoc.charAt(0).toUpperCase() + nestedAssoc.slice(1));
+      const nestedTable = qualifyName(nestedTarget, credentials);
+      const nestedFK = `${nestedAssoc}_ID`;
+      joins.push(
+        `LEFT JOIN ${nestedTable} AS ${nestedAlias} ON ${parentAlias}.${toPhysicalIdentifier(nestedFK)} = ${nestedAlias}.ID`
+      );
+
+      collectNestedExpandColumns(
+        (col as any).expand as ColumnSpec[],
+        `${pathPrefix}_${nestedAssoc}`,
+        nestedAlias,
+        joins,
+        expandColumns,
+        credentials,
+        nextAlias,
+        getDefinitionForEntity(nestedTarget)
+      );
+      continue;
+    }
+
+    const alias = `${pathPrefix}_${colName}`;
+    expandColumns.push(`${parentAlias}.${toPhysicalIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+  }
+}
+
+function isLikelyToMany(associationName: string): boolean {
+  return associationName.endsWith('s');
+}
+
+function singularize(name: string): string {
+  return name.endsWith('s') ? name.slice(0, -1) : name;
+}
+
 /**
  * Translate FROM clause
  */
-function translateFrom(from: FromClause, credentials: SnowflakeCredentials): string {
+function translateFrom(from: FromClause, credentials: SnowflakeCredentials, target?: any): string {
   if (from.ref) {
-    const tableName = from.ref.join('.');
+    const tableName = resolveTableNameFromRef(from.ref, target);
     const qualified = qualifyName(tableName, credentials);
     
     if (from.as) {
@@ -268,8 +357,9 @@ function translateFrom(from: FromClause, credentials: SnowflakeCredentials): str
  * Translate column specification
  */
 function translateColumn(col: ColumnSpec): string {
+  if (typeof col === 'string') return col;
   if (col.ref) {
-    const colName = col.ref.map(part => quoteIdentifier(part)).join('.');
+    const colName = col.ref.map(part => toPhysicalIdentifier(part)).join('.');
     if (col.as) {
       return `${colName} AS ${quoteIdentifier(col.as)}`;
     }
@@ -284,7 +374,7 @@ function translateColumn(col: ColumnSpec): string {
     return funcCall;
   }
 
-  if ('val' in col) {
+  if (col && typeof col === 'object' && 'val' in col) {
     // Literal value
     if (col.val === null) {
       return 'NULL';
@@ -331,14 +421,19 @@ function translateGroupBy(groupBy: any): string {
 /**
  * Translate INSERT
  */
-function translateInsert(insert: InsertCQN, credentials: SnowflakeCredentials, params: any[]): SQLResult {
-  const tableName = qualifyName(insert.into, credentials);
+function translateInsert(
+  insert: InsertCQN,
+  credentials: SnowflakeCredentials,
+  params: any[],
+  context?: TranslateContext
+): SQLResult {
+  const tableName = qualifyName(resolveEntityName(insert.into, context?.target), credentials);
   
   if (insert.entries && insert.entries.length > 0) {
     // Bulk insert from entries
     const firstEntry = insert.entries[0];
     const columns = Object.keys(firstEntry);
-    const quotedCols = columns.map(c => quoteIdentifier(c));
+    const quotedCols = columns.map(c => toPhysicalIdentifier(c));
     
     const valueSets: string[] = [];
     for (const entry of insert.entries) {
@@ -353,7 +448,7 @@ function translateInsert(insert: InsertCQN, credentials: SnowflakeCredentials, p
     return { sql, params };
   } else if (insert.columns && insert.values) {
     // Single insert with columns and values
-    const quotedCols = insert.columns.map(c => quoteIdentifier(c));
+    const quotedCols = insert.columns.map(c => toPhysicalIdentifier(c));
     const valuePlaceholders = insert.values.map(v => {
       params.push(v);
       return placeholder();
@@ -363,7 +458,7 @@ function translateInsert(insert: InsertCQN, credentials: SnowflakeCredentials, p
     return { sql, params };
   } else if (insert.rows) {
     // Multiple rows
-    const quotedCols = insert.columns?.map(c => quoteIdentifier(c)) || [];
+    const quotedCols = insert.columns?.map(c => toPhysicalIdentifier(c)) || [];
     const valueSets: string[] = [];
     
     for (const row of insert.rows) {
@@ -384,8 +479,13 @@ function translateInsert(insert: InsertCQN, credentials: SnowflakeCredentials, p
 /**
  * Translate UPDATE
  */
-function translateUpdate(update: UpdateCQN, credentials: SnowflakeCredentials, params: any[]): SQLResult {
-  const tableName = qualifyName(update.entity, credentials);
+function translateUpdate(
+  update: UpdateCQN,
+  credentials: SnowflakeCredentials,
+  params: any[],
+  context?: TranslateContext
+): SQLResult {
+  const tableName = qualifyName(resolveEntityName(update.entity, context?.target), credentials);
   
   if (!update.data) {
     throw new Error('UPDATE requires data');
@@ -394,7 +494,7 @@ function translateUpdate(update: UpdateCQN, credentials: SnowflakeCredentials, p
   const setClauses: string[] = [];
   for (const [key, value] of Object.entries(update.data)) {
     params.push(value);
-    setClauses.push(`${quoteIdentifier(key)} = ${placeholder()}`);
+    setClauses.push(`${toPhysicalIdentifier(key)} = ${placeholder()}`);
   }
 
   let sql = `UPDATE ${tableName} SET ${setClauses.join(', ')}`;
@@ -413,8 +513,13 @@ function translateUpdate(update: UpdateCQN, credentials: SnowflakeCredentials, p
 /**
  * Translate DELETE
  */
-function translateDelete(del: DeleteCQN, credentials: SnowflakeCredentials, params: any[]): SQLResult {
-  const tableName = qualifyName(del.from, credentials);
+function translateDelete(
+  del: DeleteCQN,
+  credentials: SnowflakeCredentials,
+  params: any[],
+  context?: TranslateContext
+): SQLResult {
+  const tableName = qualifyName(resolveEntityName(del.from, context?.target), credentials);
   let sql = `DELETE FROM ${tableName}`;
 
   // WHERE
@@ -473,5 +578,54 @@ export function generateMerge(
   sql += `WHEN NOT MATCHED THEN INSERT (${quotedCols.join(', ')}) VALUES (${quotedCols.map(col => `source.${col}`).join(', ')})`;
 
   return { sql, params };
+}
+
+function getDefinitionForEntity(entityName: string): any | undefined {
+  const defs = (cds.model as any)?.definitions;
+  return defs?.[entityName];
+}
+
+function resolveAssociationTargetName(target: any, assocName: string): string | undefined {
+  const assoc = target?.elements?.[assocName];
+  const assocTargetName = assoc?.target;
+  if (!assocTargetName) return undefined;
+  const targetDef = getDefinitionForEntity(assocTargetName);
+  return targetDef?.['@cds.persistence.name'] || assocTargetName;
+}
+
+function resolveTableNameFromRef(ref: string[], target?: any): string {
+  const logicalName = ref.length === 1 ? ref[0] : ref.join('.');
+  return resolveEntityName(logicalName, target);
+}
+
+function resolveEntityName(entityName: any, target?: any): string {
+  if (entityName && typeof entityName === 'object' && Array.isArray(entityName.ref)) {
+    entityName = entityName.ref.length === 1 ? entityName.ref[0] : entityName.ref.join('.');
+  }
+  if (typeof entityName !== 'string') {
+    return String(entityName);
+  }
+  if (target?.name === entityName && target?.['@cds.persistence.name']) {
+    return target['@cds.persistence.name'];
+  }
+  const def = getDefinitionForEntity(entityName);
+  if (def?.['@cds.persistence.name']) {
+    return def['@cds.persistence.name'];
+  }
+  // If this looks like service-qualified name, fallback to simple entity name.
+  if (entityName.includes('.')) {
+    return entityName.split('.').pop() || entityName;
+  }
+  return entityName;
+}
+
+function toPhysicalIdentifier(identifier: string): string {
+  if (!identifier) return identifier;
+  if (identifier === '*') return identifier;
+  if (identifier.startsWith('"') && identifier.endsWith('"')) return identifier;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    return identifier.toUpperCase();
+  }
+  return quoteIdentifier(identifier);
 }
 

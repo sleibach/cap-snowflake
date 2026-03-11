@@ -91,11 +91,11 @@ function translateOperator(op: string): string {
  */
 function translateRef(ref: string[]): string {
   if (ref.length === 1) {
-    return quoteIdentifier(ref[0]);
+    return toPhysicalIdentifier(ref[0]);
   }
 
   // Multiple parts: table.column or alias.column
-  return ref.map(part => quoteIdentifier(part)).join('.');
+  return ref.map(part => toPhysicalIdentifier(part)).join('.');
 }
 
 /**
@@ -201,5 +201,15 @@ function translateList(list: any[], params: any[]): string {
   });
 
   return `(${values.join(', ')})`;
+}
+
+function toPhysicalIdentifier(identifier: string): string {
+  if (!identifier) return identifier;
+  if (identifier === '*') return identifier;
+  if (identifier.startsWith('"') && identifier.endsWith('"')) return identifier;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    return identifier.toUpperCase();
+  }
+  return quoteIdentifier(identifier);
 }
 

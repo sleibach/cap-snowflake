@@ -10,12 +10,34 @@ import { cqnToSQL, generateMerge } from './cqn/toSQL.js';
 import { wrapWithCount } from './cqn/pagination.js';
 import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
+import { buildDeployStatements } from './ddl/deploy.js';
 
 export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
   private sqlApiClient?: SnowflakeSQLAPIClient;
   private sdkClient?: SnowflakeSDKClient;
   private inTransaction = false;
+
+  /**
+   * CAP v9 DatabaseService compatibility:
+   * base class initializes pool metadata with `this.factory`.
+   * For this adapter we manage connectivity ourselves (SQL API / SDK),
+   * so this lightweight no-op factory is sufficient.
+   */
+  get factory() {
+    return {
+      create: async () => ({}),
+      destroy: async () => {},
+    };
+  }
+
+  /**
+   * CAP v9 hook used by base tx handling.
+   * Our adapter manages context at query level, so this is intentionally a no-op.
+   */
+  set(_variables: any) {
+    return;
+  }
 
   /**
    * Initialize the service
@@ -56,7 +78,7 @@ export class SnowflakeService extends cds.DatabaseService {
    * Handle READ operations
    * Supports expand (LEFT JOIN), temporal queries, and localized data
    */
-  private async onRead(req: any): Promise<any[]> {
+  private async onRead(req: any): Promise<any> {
     const query = req.query;
     try {
       const select = query.SELECT;
@@ -69,10 +91,15 @@ export class SnowflakeService extends cds.DatabaseService {
       const needsCount = select.count;
 
       // Translate to SQL (now with JOIN-based expand support)
-      const { sql, params } = cqnToSQL(query, this.credentials);
-      
+      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
+
+      if (this.shouldStreamRead(req, select)) {
+        return this.executeStream(sql, params, req?.data?.batchSize);
+      }
+
       // Execute query
       let rows = await this.execute(sql, params);
+      rows = this.mapRowKeysToElements(rows, req.target);
 
       // Restructure expanded results if needed
       rows = this.restructureExpands(rows, select);
@@ -99,6 +126,10 @@ export class SnowflakeService extends cds.DatabaseService {
     }
   }
 
+  private shouldStreamRead(req: any, select: any): boolean {
+    return req?.data?.$stream === true || select?.stream === true;
+  }
+
   /**
    * Restructure expanded results from flat JOIN to nested objects
    */
@@ -115,6 +146,13 @@ export class SnowflakeService extends cds.DatabaseService {
 
       // Separate base and expanded fields
       for (const [key, value] of Object.entries(row)) {
+        // To-many expansions are returned as aggregated JSON arrays under association name.
+        const toManyCol = select.columns.find((col: any) => col.expand && col.ref?.[0] === key);
+        if (toManyCol) {
+          result[key] = value;
+          continue;
+        }
+
         // Check if this is an expanded field (contains association name prefix)
         let isExpandField = false;
 
@@ -122,11 +160,9 @@ export class SnowflakeService extends cds.DatabaseService {
           if (col.expand && col.ref) {
             const assocName = col.ref[0];
             if (key.startsWith(`${assocName}_`) && key !== `${assocName}_ID`) {
-              const fieldName = key.substring(assocName.length + 1);
-              if (!expanded.has(assocName)) {
-                expanded.set(assocName, {});
-              }
-              expanded.get(assocName)[fieldName] = value;
+              if (!expanded.has(assocName)) expanded.set(assocName, {});
+              const nestedPath = key.substring(assocName.length + 1).split('_');
+              this.assignNested(expanded.get(assocName), nestedPath, value);
               isExpandField = true;
               break;
             }
@@ -147,6 +183,57 @@ export class SnowflakeService extends cds.DatabaseService {
 
       return result;
     });
+  }
+
+  private assignNested(target: any, path: string[], value: any) {
+    if (path.length === 0) return;
+    if (path.length === 1) {
+      target[path[0]] = value;
+      return;
+    }
+    const [head, ...tail] = path;
+    if (!target[head] || typeof target[head] !== 'object') {
+      target[head] = {};
+    }
+    this.assignNested(target[head], tail, value);
+  }
+
+  private mapRowKeysToElements(rows: any[], target: any): any[] {
+    const elements = target?.elements;
+    if (!Array.isArray(rows)) return rows;
+    const elementNames = elements ? Object.keys(elements) : [];
+    if (!elementNames.length && !elements) {
+      return rows.map((row) => this.mapUppercaseFallback(row));
+    }
+
+    return rows.map((row) => {
+      const mapped: any = {};
+      for (const [key, value] of Object.entries(row)) {
+        const exact = elementNames.find((n) => n === key);
+        if (exact) {
+          mapped[exact] = value;
+          continue;
+        }
+        const caseInsensitive = elementNames.find((n) => n.toUpperCase() === key.toUpperCase());
+        if (caseInsensitive) {
+          mapped[caseInsensitive] = value;
+          continue;
+        }
+        mapped[key] = value;
+      }
+      return this.mapUppercaseFallback(mapped);
+    });
+  }
+
+  private mapUppercaseFallback(row: any): any {
+    const out: any = {};
+    for (const [key, value] of Object.entries(row)) {
+      if (/^[A-Z0-9_]+$/.test(key)) {
+        out[key.toLowerCase()] = value;
+      }
+      out[key] = value;
+    }
+    return out;
   }
 
   /**
@@ -180,7 +267,7 @@ export class SnowflakeService extends cds.DatabaseService {
       // Note: CAP runtime handles @readonly checks before reaching adapter
       // Note: CAP runtime fills in cuid, managed fields automatically
 
-      const { sql, params } = cqnToSQL(query, this.credentials);
+      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
       
       await this.execute(sql, params);
 
@@ -211,7 +298,7 @@ export class SnowflakeService extends cds.DatabaseService {
       // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
       // Note: CAP runtime updates managed fields (modifiedAt, modifiedBy) automatically
 
-      const { sql, params } = cqnToSQL(query, this.credentials);
+      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
       
       const result = await this.execute(sql, params);
 
@@ -238,7 +325,7 @@ export class SnowflakeService extends cds.DatabaseService {
       // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
       // Note: Compositions trigger cascading deletes automatically via CAP
 
-      const { sql, params } = cqnToSQL(query, this.credentials);
+      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
       
       await this.execute(sql, params);
 
@@ -296,6 +383,22 @@ export class SnowflakeService extends cds.DatabaseService {
     }
 
     throw new Error('No client available');
+  }
+
+  private async executeStream(
+    sql: string,
+    params?: any[],
+    batchSize?: number
+  ): Promise<any> {
+    const effectiveBatchSize = typeof batchSize === 'number' ? batchSize : 1000;
+
+    if (this.sqlApiClient && this.sqlApiClient.queryStream) {
+      return this.sqlApiClient.queryStream(sql, params, { batchSize: effectiveBatchSize });
+    } else if (this.sdkClient && this.sdkClient.queryStream) {
+      return this.sdkClient.queryStream(sql, params, { batchSize: effectiveBatchSize });
+    }
+
+    return this.execute(sql, params);
   }
 
   /**
@@ -380,16 +483,43 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Deploy database schema (for cds deploy)
    */
+  async deploy(model?: any, options?: any): Promise<any> {
+    const effectiveModel = model || (this as any).model;
+    await this.handleDeploy(effectiveModel, options);
+    return effectiveModel;
+  }
+
   private async handleDeploy(model: any, options?: any): Promise<void> {
     logInfo('Deploy operation called', options);
-    
-    // Basic deploy support - could be extended with full DDL generation
-    logWarning('Full DDL deployment not yet implemented. Please create Snowflake tables manually.');
-    
-    // In production implementation, would:
-    // 1. Parse model (CSN)
-    // 2. Generate CREATE TABLE statements using ddl/deploy.ts
-    // 3. Execute DDL statements
+
+    if (!model) {
+      throw new Error('Deploy requires a CDS model');
+    }
+
+    const statements = buildDeployStatements(model, this.credentials, {
+      createViews: options?.createViews !== false
+    });
+
+    if (statements.length === 0) {
+      logWarning('No deploy statements generated for provided model');
+      return;
+    }
+
+    for (const sql of statements) {
+      try {
+        await this.execute(sql);
+      } catch (error: any) {
+        // Snowflake may return "already exists" for views/tables from previous runs.
+        const message = String(error?.message || '');
+        if (message.includes('already exists')) {
+          logWarning('Deploy statement skipped (already exists)', { sql });
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    logInfo('Deploy operation finished', { statements: statements.length });
   }
 }
 

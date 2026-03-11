@@ -115,6 +115,37 @@ export class SnowflakeSDKClient {
   }
 
   /**
+   * Stream query results in chunks using LIMIT/OFFSET paging.
+   */
+  async *queryStream(
+    sql: string,
+    binds?: any[],
+    options?: { batchSize?: number }
+  ): AsyncGenerator<any, void, unknown> {
+    const batchSize = Math.max(1, options?.batchSize || 1000);
+    let offset = 0;
+
+    while (true) {
+      const pagedSQL = `SELECT * FROM (${sql}) AS stream_src LIMIT ${batchSize} OFFSET ${offset}`;
+      const result = await this.execute(pagedSQL, binds);
+
+      if (!result.rows.length) {
+        return;
+      }
+
+      for (const row of result.rows) {
+        yield row;
+      }
+
+      if (result.rows.length < batchSize) {
+        return;
+      }
+
+      offset += batchSize;
+    }
+  }
+
+  /**
    * Begin transaction
    */
   async beginTransaction(): Promise<void> {

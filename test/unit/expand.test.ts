@@ -144,6 +144,52 @@ describe('Expand Support', () => {
       // Should have multiple LEFT JOINs for nested structure
       expect(result.sql).to.include('LEFT JOIN');
     });
+
+    it('should generate nested aliases for multi-level to-one expansions', () => {
+      const cqn = {
+        SELECT: {
+          from: { ref: ['Books'], as: 'base' },
+          columns: [
+            { ref: ['ID'] },
+            {
+              ref: ['author'],
+              expand: [
+                { ref: ['name'] },
+                {
+                  ref: ['country'],
+                  expand: [{ ref: ['code'] }]
+                }
+              ]
+            }
+          ]
+        }
+      };
+
+      const result = cqnToSQL(cqn, credentials);
+      expect(result.sql).to.include('AS "author_name"');
+      expect(result.sql).to.include('AS "author_country_code"');
+    });
+  });
+
+  describe('To-many optimization', () => {
+    it('should generate ARRAY_AGG subquery for to-many expansion', () => {
+      const cqn = {
+        SELECT: {
+          from: { ref: ['Author'], as: 'base' },
+          columns: [
+            { ref: ['ID'] },
+            {
+              ref: ['books'],
+              expand: [{ ref: ['ID'] }, { ref: ['title'] }]
+            }
+          ]
+        }
+      };
+
+      const result = cqnToSQL(cqn, credentials);
+      expect(result.sql).to.include('ARRAY_AGG');
+      expect(result.sql).to.include('AS "books"');
+    });
   });
 
   describe('Path expressions', () => {

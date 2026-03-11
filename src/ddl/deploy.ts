@@ -5,6 +5,18 @@
 import { mapCDSType } from './types.js';
 import { quoteIdentifier, qualifyName } from '../identifiers.js';
 import { SnowflakeCredentials } from '../config.js';
+import {
+  extractLocalizedElements,
+  generateLocalizedView,
+  generateTextsTable,
+  getEntityKeys,
+  hasLocalizedElements
+} from '../features/localized.js';
+import {
+  generateTemporalTableDDL,
+  generateTemporalView,
+  isTemporal
+} from '../features/temporal.js';
 
 export interface EntityDefinition {
   name: string;
@@ -28,7 +40,8 @@ export interface ElementDefinition {
  */
 export function generateCreateTable(
   entity: EntityDefinition,
-  credentials: SnowflakeCredentials
+  credentials: SnowflakeCredentials,
+  ifNotExists = true
 ): string {
   const tableName = qualifyName(entity.name, credentials);
   const columns: string[] = [];
@@ -44,7 +57,7 @@ export function generateCreateTable(
     }
   }
 
-  let sql = `CREATE TABLE ${tableName} (\n  ${columns.join(',\n  ')}`;
+  let sql = `CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}${tableName} (\n  ${columns.join(',\n  ')}`;
 
   // Add primary key constraint
   if (keys.length > 0) {
@@ -102,10 +115,11 @@ function formatDefault(value: any): string {
 export function generateCreateView(
   viewName: string,
   selectSQL: string,
-  credentials: SnowflakeCredentials
+  credentials: SnowflakeCredentials,
+  orReplace = true
 ): string {
   const qualifiedName = qualifyName(viewName, credentials);
-  return `CREATE VIEW ${qualifiedName} AS\n${selectSQL}`;
+  return `CREATE ${orReplace ? 'OR REPLACE ' : ''}VIEW ${qualifiedName} AS\n${selectSQL}`;
 }
 
 /**
@@ -129,5 +143,134 @@ export function generateCreateSequence(
 ): string {
   const qualifiedName = qualifyName(sequenceName, credentials);
   return `CREATE SEQUENCE ${qualifiedName} START = 1 INCREMENT = 1`;
+}
+
+interface DeployOptions {
+  createViews?: boolean;
+}
+
+interface CSNElement {
+  type?: string;
+  length?: number;
+  precision?: number;
+  scale?: number;
+  key?: boolean;
+  notNull?: boolean;
+  virtual?: boolean;
+  target?: string;
+  isAssociation?: boolean;
+  default?: { val?: any };
+  ['@mandatory']?: boolean;
+}
+
+interface CSNDefinition {
+  kind?: string;
+  query?: any;
+  elements?: Record<string, CSNElement>;
+  ['@cds.persistence.skip']?: boolean;
+  ['@cds.persistence.exists']?: boolean;
+  ['@cds.persistence.name']?: string;
+}
+
+/**
+ * Generate deploy SQL statements from a CSN model.
+ */
+export function buildDeployStatements(
+  model: any,
+  credentials: SnowflakeCredentials,
+  options: DeployOptions = {}
+): string[] {
+  const definitions = model?.definitions || {};
+  const statements: string[] = [];
+  const createViews = options.createViews !== false;
+
+  for (const [name, definition] of Object.entries(definitions)) {
+    const def = definition as CSNDefinition;
+
+    if (def.kind !== 'entity') continue;
+    if (def.query) continue; // projections/views are not deployed as tables here
+    if (def['@cds.persistence.skip'] || def['@cds.persistence.exists']) continue;
+
+    const tableName = getPersistenceName(name, def);
+    const entityDef = toEntityDefinition(tableName, def);
+    if (Object.keys(entityDef.elements).length === 0) continue;
+
+    if (isTemporal(def)) {
+      statements.push(generateTemporalTableDDL({ ...def, name: tableName }, credentials));
+    } else {
+      statements.push(generateCreateTable(entityDef, credentials, true));
+    }
+
+    if (hasLocalizedElements(def)) {
+      const keys = getEntityKeys(def);
+      if (keys.length > 0) {
+        statements.push(
+          generateTextsTable(
+            {
+              entityName: tableName,
+              localizedElements: extractLocalizedElements(def),
+              keys
+            },
+            credentials
+          )
+        );
+        if (createViews) {
+          statements.push(
+            generateLocalizedView(
+              {
+                entityName: tableName,
+                localizedElements: extractLocalizedElements(def),
+                keys
+              },
+              credentials
+            )
+          );
+        }
+      }
+    }
+
+    if (isTemporal(def) && createViews) {
+      statements.push(generateTemporalView({ ...def, name: tableName }, credentials));
+    }
+  }
+
+  return statements;
+}
+
+function getPersistenceName(name: string, definition: CSNDefinition): string {
+  const customName = definition['@cds.persistence.name'];
+  if (typeof customName === 'string' && customName.length > 0) {
+    return customName.replace(/^"|"$/g, '');
+  }
+  const parts = name.split('.');
+  return parts[parts.length - 1];
+}
+
+function toEntityDefinition(name: string, definition: CSNDefinition): EntityDefinition {
+  const elements = definition.elements || {};
+  const mappedElements: Record<string, ElementDefinition> = {};
+
+  for (const [elementName, element] of Object.entries(elements)) {
+    // Skip associations/compositions/virtual elements; managed foreign keys are separate elements in linked CSN.
+    if (element.virtual) continue;
+    if (element.target || element.isAssociation) continue;
+    if (!element.type) continue;
+
+    mappedElements[elementName] = {
+      type: element.type,
+      length: element.length,
+      precision: element.precision,
+      scale: element.scale,
+      key: element.key,
+      notNull: element.notNull || element.key || element['@mandatory'] === true,
+      default: element.default?.val
+    };
+  }
+
+  return {
+    name,
+    kind: 'entity',
+    elements: mappedElements
+  };
 }
 

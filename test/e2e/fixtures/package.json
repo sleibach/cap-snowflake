@@ -1,0 +1,12 @@
+{
+  "name": "cap-snowflake-e2e-fixture",
+  "private": true,
+  "cds": {
+    "requires": {
+      "db": {
+        "kind": "snowflake",
+        "impl": "../../../dist/index.js"
+      }
+    }
+  }
+}

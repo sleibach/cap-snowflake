@@ -29,7 +29,7 @@ function translateOrderByItem(item: OrderByItem): string {
   let clause = '';
 
   if (item.ref) {
-    clause = item.ref.map(part => quoteIdentifier(part)).join('.');
+    clause = item.ref.map(part => toPhysicalIdentifier(part)).join('.');
   } else {
     // Fallback to string representation
     clause = String(item);
@@ -46,5 +46,15 @@ function translateOrderByItem(item: OrderByItem): string {
   }
 
   return clause;
+}
+
+function toPhysicalIdentifier(identifier: string): string {
+  if (!identifier) return identifier;
+  if (identifier === '*') return identifier;
+  if (identifier.startsWith('"') && identifier.endsWith('"')) return identifier;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    return identifier.toUpperCase();
+  }
+  return quoteIdentifier(identifier);
 }
 

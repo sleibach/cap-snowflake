@@ -210,6 +210,32 @@ cds serve
 curl http://localhost:4004/catalog/Books
 ```
 
+## Step 6: Run adapter E2E tests
+
+From the adapter project root:
+
+```bash
+# Live E2E mode
+export SNOWFLAKE_TEST=true
+export SNOWFLAKE_ACCOUNT=...
+export SNOWFLAKE_USER=...
+export SNOWFLAKE_DATABASE=...
+export SNOWFLAKE_SCHEMA=...
+export SNOWFLAKE_PRIVATE_KEY=...
+npm run test:e2e
+
+# Optional smoke flag mode (same suite)
+export SNOWFLAKE_E2E_SMOKE=true
+npm run test:e2e:smoke
+```
+
+If you use SDK auth for tests:
+
+```bash
+export SNOWFLAKE_AUTH=sdk
+export SNOWFLAKE_PASSWORD=...
+```
+
 ## Troubleshooting
 
 ### "JWT token is invalid"

@@ -1,6 +1,6 @@
 # cap-snowflake
 
-Production-ready SAP CAP database adapter for Snowflake with full OData support.
+SAP CAP database adapter for Snowflake with full OData support.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
@@ -56,6 +56,9 @@ Add to your `package.json`:
   }
 }
 ```
+
+> [!IMPORTANT]
+> For Cloud Foundry deployments, Snowflake credentials should be provided at runtime via a user-provided service bound to the app, rather than hardcoding them in project files or typical user provided environment varibales.
 
 ### 2. Set up environment variables
 
@@ -338,9 +341,9 @@ try {
 
 ## Limitations (v1.0)
 
-1. **DDL Generation** - Manual table creation required (deploy feature coming soon)
+1. **DDL Generation** - `cds deploy` supports baseline table/view creation; advanced migration diffs are still manual
 2. **Foreign Keys** - Snowflake doesn't enforce FKs; only for metadata
-3. **Complex $expand** - Uses follow-up queries instead of JOINs
+3. **Complex $expand** - Deep nested and unmanaged edge cases may still require follow-up query strategies
 4. **SQL API Transactions** - Limited compared to SDK mode
 5. **Auto-increment** - Requires SEQUENCE objects (manual setup)
 
@@ -363,9 +366,40 @@ export SNOWFLAKE_USER=...
 export SNOWFLAKE_PRIVATE_KEY=...
 npm run test:integ
 
+# Run HTTP E2E tests against Snowflake
+export SNOWFLAKE_TEST=true
+npm run test:e2e
+
+# Run E2E suite in smoke mode
+export SNOWFLAKE_E2E_SMOKE=true
+npm run test:e2e:smoke
+
 # Lint
 npm run lint
 ```
+
+### E2E test environment variables
+
+The E2E suite in `test/e2e/cap-http.test.ts` expects:
+
+- `SNOWFLAKE_ACCOUNT`
+- `SNOWFLAKE_USER`
+- `SNOWFLAKE_DATABASE`
+- `SNOWFLAKE_SCHEMA`
+- Optional: `SNOWFLAKE_HOST`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`
+- Auth:
+  - JWT mode: `SNOWFLAKE_PRIVATE_KEY` (+ optional `SNOWFLAKE_PASSPHRASE`)
+  - SDK mode: `SNOWFLAKE_AUTH=sdk` and `SNOWFLAKE_PASSWORD`
+
+### Deploy support (`cds deploy`)
+
+The adapter now performs model-driven deploy execution for persisted entities:
+
+- creates base tables (idempotent where possible)
+- creates localized `.texts` tables and localized views
+- creates temporal tables and current-slice views
+
+For complex schema evolution on existing objects, use explicit migration SQL.
 
 ## Examples
 
@@ -488,11 +522,11 @@ See [Annotations Support Guide](./docs/ANNOTATIONS_SUPPORT.md) for complete deta
 - Path expressions - Navigation through associations in SELECT and WHERE
 
 **Planned (v1.1+)**:
-- Full DDL deployment (cds deploy)
-- Streaming large result sets
+- Advanced migration diffing for `cds deploy` (alter/rename support)
+- Streaming optimizations (adaptive chunking/backpressure tuning)
 - Connection pooling for SQL API
 - Change data capture (CDC) integration
-- Deep nested $expand optimization
+- Deep nested `$expand` edge-case optimization
 
 **Future (v2.0+)**:
 - Advanced Snowflake features (clustering hints, time travel, result caching)
