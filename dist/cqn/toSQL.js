@@ -1,0 +1,894 @@
+/**
+ * Main CQN to SQL translator
+ */
+import { quoteIdentifier, qualifyName, toPhysicalIdentifier } from '../identifiers.js';
+import { placeholder } from '../params.js';
+import { translateFilter, translateSearch } from './filters.js';
+import { translateOrderBy } from './orderby.js';
+import { translatePagination } from './pagination.js';
+import cds from '@sap/cds';
+/**
+ * Main entry point: translate CQN to SQL
+ */
+export function cqnToSQL(cqn, credentials, context) {
+    const params = [];
+    if (cqn.SELECT) {
+        return translateSelect(cqn.SELECT, credentials, params, context);
+    }
+    else if (cqn.INSERT) {
+        return translateInsert(cqn.INSERT, credentials, params, context);
+    }
+    else if (cqn.UPDATE) {
+        return translateUpdate(cqn.UPDATE, credentials, params, context);
+    }
+    else if (cqn.DELETE) {
+        return translateDelete(cqn.DELETE, credentials, params, context);
+    }
+    throw new Error('Unsupported CQN operation');
+}
+/**
+ * Translate SELECT
+ */
+function translateSelect(select, credentials, params, context) {
+    let sql = 'SELECT';
+    // DISTINCT
+    if (select.distinct) {
+        sql += ' DISTINCT';
+    }
+    // Check for expansions
+    const hasExpansions = select.columns?.some(col => col.expand || col.inline);
+    // Columns
+    if (select.columns && select.columns.length > 0) {
+        if (hasExpansions) {
+            // Handle expansions with JOINs
+            const { baseColumns, expandColumns, joins } = processColumnsWithExpand(select.columns, select.from, credentials, params, context?.target);
+            const cols = [...baseColumns, ...expandColumns].join(', ');
+            sql += ` ${cols}`;
+            // FROM with joins
+            let fromClause = translateFrom(select.from, credentials, context?.target);
+            if (!select.from.as) {
+                fromClause += ' AS base';
+            }
+            sql += ` FROM ${fromClause}`;
+            if (joins.length) {
+                sql += ` ${joins.join(' ')}`;
+            }
+        }
+        else {
+            // Regular columns — handle synthetic draft columns on active-entity reads
+            const isDraft = isDraftTarget(context?.target, select.from);
+            const cols = select.columns.map(col => {
+                if (col.ref && !isDraft) {
+                    const colName = col.ref[col.ref.length - 1];
+                    if (isSyntheticDraftColumn(colName)) {
+                        return `${syntheticColumnValue(colName)} AS ${quoteIdentifier(col.as || colName)}`;
+                    }
+                    if (col.ref.length > 1 && isSyntheticDraftColumn(String(col.ref[0]))) {
+                        return `NULL AS ${quoteIdentifier(col.as || colName)}`;
+                    }
+                    const element = context?.target?.elements?.[colName];
+                    const explicitlyNonPhysical = element !== undefined &&
+                        (!!element.virtual || !!element.target || !element.type);
+                    if (explicitlyNonPhysical) {
+                        return `${syntheticColumnValue(colName)} AS ${quoteIdentifier(col.as || colName)}`;
+                    }
+                }
+                return translateColumn(col);
+            }).join(', ');
+            sql += ` ${cols}`;
+            sql += ` FROM ${translateFrom(select.from, credentials, context?.target)}`;
+        }
+    }
+    else {
+        sql += ' *';
+        sql += ` FROM ${translateFrom(select.from, credentials, context?.target)}`;
+    }
+    // WHERE + $search — use base alias when JOINs are present to avoid ambiguity
+    const filterAlias = hasExpansions ? (select.from.as || 'base') : undefined;
+    const isDraftQuery = isDraftTarget(context?.target, select.from);
+    let hasWhere = false;
+    // CAP embeds inline WHERE in the FROM ref for readAfterWrite (SELECT.one with keys):
+    // from: { ref: [{ id: 'Entity', where: [...] }] }
+    // Only apply when ref has exactly 1 element — navigation paths (ref.length > 1) use a
+    // different mechanism and the inline WHERE belongs to the source entity, not the target.
+    const inlineFromWhere = Array.isArray(select.from?.ref) && select.from.ref.length === 1
+        ? extractInlineWhere(select.from)
+        : undefined;
+    const effectiveWhere = (select.where && select.where.length > 0) ? select.where : inlineFromWhere;
+    if (effectiveWhere && effectiveWhere.length > 0) {
+        const whereClause = translateFilter(effectiveWhere, params, filterAlias, isDraftQuery);
+        if (whereClause) {
+            sql += ` WHERE ${whereClause}`;
+            hasWhere = true;
+        }
+    }
+    // $search support: translate to ILIKE conditions over searchable string columns
+    const searchExpr = select.search;
+    if (searchExpr && searchExpr.length > 0) {
+        const targetElements = context?.target?.elements ?? {};
+        const searchSQL = translateSearch(searchExpr, targetElements, params, filterAlias);
+        if (searchSQL) {
+            sql += hasWhere ? ` AND (${searchSQL})` : ` WHERE (${searchSQL})`;
+            hasWhere = true; // eslint-disable-line @typescript-eslint/no-unused-vars
+        }
+    }
+    // GROUP BY
+    if (select.groupBy && select.groupBy.length > 0) {
+        const groupByClause = select.groupBy.map(g => translateGroupBy(g)).join(', ');
+        sql += ` GROUP BY ${groupByClause}`;
+    }
+    // HAVING
+    if (select.having && select.having.length > 0) {
+        const havingClause = translateFilter(select.having, params);
+        if (havingClause) {
+            sql += ` HAVING ${havingClause}`;
+        }
+    }
+    // ORDER BY
+    if (select.orderBy && select.orderBy.length > 0) {
+        const orderByClause = translateOrderBy(select.orderBy);
+        if (orderByClause) {
+            sql += ` ${orderByClause}`;
+        }
+    }
+    // LIMIT/OFFSET
+    if (select.limit) {
+        const top = select.limit.rows?.val;
+        const skip = select.limit.offset?.val;
+        const pagination = translatePagination({ top, skip });
+        if (pagination) {
+            sql += ` ${pagination}`;
+        }
+    }
+    return { sql, params };
+}
+/**
+ * Process columns with expand/inline specifications
+ */
+function processColumnsWithExpand(columns, from, credentials, _params, baseTarget) {
+    const baseColumns = [];
+    const expandColumns = [];
+    const joins = [];
+    const baseAlias = from.as || 'base';
+    let joinCounter = 0;
+    const isDraft = isDraftTarget(baseTarget, from);
+    for (const col of columns) {
+        if (col.expand) {
+            const assocName = col.ref[0];
+            const expandSpec = col.expand;
+            if (isLikelyToMany(assocName, baseTarget)) {
+                const targetEntity = resolveAssociationTargetName(baseTarget, assocName)
+                    || (assocName.charAt(0).toUpperCase() + assocName.slice(1));
+                const targetTable = qualifyName(targetEntity, credentials);
+                // Derive the FK name from the simple entity name (last segment after dot).
+                // from.ref[0] may be a fully qualified name like 'E2ETestService.Authors'
+                // or an object { id: '...' }; we need only the short name, e.g. 'Authors'.
+                const fromRefFirst = (from.ref || [])[0];
+                const fromRefName = typeof fromRefFirst === 'string' ? fromRefFirst
+                    : fromRefFirst?.id ?? fromRefFirst?.name ?? 'parent';
+                const fromSimpleName = fromRefName.split('.').pop() ?? fromRefName;
+                const parentFK = `${singularize(fromSimpleName)}_ID`;
+                let subWhere = `tm.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID`;
+                const expandWhere = col.where;
+                if (expandWhere && expandWhere.length > 0) {
+                    const extraWhere = translateFilter(expandWhere, _params);
+                    if (extraWhere)
+                        subWhere += ` AND ${extraWhere}`;
+                }
+                // Build OBJECT_CONSTRUCT: use explicit key-value pairs for $select so that CDS
+                // element names (e.g. 'title') are used as JSON keys instead of Snowflake physical
+                // column names (e.g. TITLE), fixing case-mismatch in OData responses.
+                const isWildcard = expandSpec.length === 1 && expandSpec[0].ref?.[0] === '*';
+                let objConstruct;
+                if (isWildcard) {
+                    objConstruct = 'OBJECT_CONSTRUCT(*)';
+                }
+                else {
+                    const pairs = expandSpec
+                        .filter((c) => c.ref)
+                        .map((c) => {
+                        const cdsName = c.ref[0];
+                        return `'${cdsName}', ${toPhysicalIdentifier(cdsName)}`;
+                    })
+                        .join(', ');
+                    objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
+                }
+                // COALESCE ensures an empty array [] is returned instead of NULL when no rows match.
+                let subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
+                const expandLimit = col.limit?.rows?.val;
+                if (expandLimit)
+                    subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID LIMIT ${expandLimit}) AS tm`;
+                expandColumns.push(`(${subQuery}) AS ${quoteIdentifier(assocName)}`);
+            }
+            else {
+                const joinAlias = `expand_${joinCounter++}`;
+                const foreignKey = resolveForeignKey(baseTarget, assocName);
+                // On active-entity tables, draft associations have no physical FK.
+                // On .drafts tables these columns ARE physical, so expand normally.
+                const assocIsSynthetic = !isDraft && isSyntheticDraftColumn(assocName);
+                const fkElement = baseTarget?.elements?.[foreignKey];
+                const fkMissing = assocIsSynthetic ||
+                    (!isDraft && baseTarget?.elements !== undefined && fkElement === undefined);
+                if (fkMissing) {
+                    collectNullExpandColumns(expandSpec, assocName, expandColumns);
+                }
+                else {
+                    const targetEntity = resolveAssociationTargetName(baseTarget, assocName)
+                        || (assocName.charAt(0).toUpperCase() + assocName.slice(1));
+                    const targetTable = qualifyName(targetEntity, credentials);
+                    const targetKey = resolveTargetKey(baseTarget, assocName);
+                    let joinCondition = `${baseAlias}.${toPhysicalIdentifier(foreignKey)} = ${joinAlias}.${toPhysicalIdentifier(targetKey)}`;
+                    const expandWhere = col.where;
+                    if (expandWhere && expandWhere.length > 0) {
+                        const extraWhere = translateFilter(expandWhere, _params);
+                        if (extraWhere)
+                            joinCondition += ` AND ${extraWhere}`;
+                    }
+                    joins.push(`LEFT JOIN ${targetTable} AS ${joinAlias} ON ${joinCondition}`);
+                    // Look up the CDS definition for the expand target using the original
+                    // association target name (not the physical table name) so that element
+                    // metadata (for wildcard expand handling) is available.
+                    const assocCDSTarget = baseTarget?.elements?.[assocName]?.target;
+                    const targetDef = getDefinitionForEntity(assocCDSTarget) || getDefinitionForEntity(targetEntity);
+                    collectNestedExpandColumns(expandSpec, assocName, joinAlias, joins, expandColumns, credentials, () => `expand_${joinCounter++}`, targetDef, _params);
+                }
+            }
+        }
+        else if (col.inline) {
+            // Inline expansion: similar to expand but flattens structure
+            const assocName = col.ref[0];
+            const joinAlias = `inline_${joinCounter++}`;
+            const foreignKey = resolveForeignKey(baseTarget, assocName);
+            const targetEntity = resolveAssociationTargetName(baseTarget, assocName)
+                || (assocName.charAt(0).toUpperCase() + assocName.slice(1));
+            const targetTable = qualifyName(targetEntity, credentials);
+            const inlineTargetKey = resolveTargetKey(baseTarget, assocName);
+            const joinSQL = `LEFT JOIN ${targetTable} AS ${joinAlias} ON ${baseAlias}.${toPhysicalIdentifier(foreignKey)} = ${joinAlias}.${toPhysicalIdentifier(inlineTargetKey)}`;
+            joins.push(joinSQL);
+            // Add inlined columns (flattened, no prefix)
+            const inlineSpec = col.inline;
+            for (const inlineCol of inlineSpec) {
+                if (inlineCol.ref) {
+                    const colName = inlineCol.ref[inlineCol.ref.length - 1];
+                    const alias = inlineCol.as || `${assocName}_${colName}`;
+                    expandColumns.push(`${joinAlias}.${toPhysicalIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+                }
+            }
+        }
+        else {
+            // Regular column
+            if (col.ref) {
+                const colName = col.ref[col.ref.length - 1];
+                const alias = col.as || colName;
+                // Multi-part nav refs (e.g. DraftAdministrativeData.DraftMessages)
+                if (col.ref.length > 1) {
+                    baseColumns.push(`NULL AS ${quoteIdentifier(col.as || colName)}`);
+                }
+                else if (isSyntheticDraftColumn(colName)) {
+                    // Synthetic draft indicator columns (IsActiveEntity, HasDraftEntity, etc.)
+                    // do not exist on active-entity tables; emit constant values.
+                    // On actual draft tables they ARE physical but only appear in queries that
+                    // go through the non-expand path (translateColumn), not here.
+                    baseColumns.push(`${syntheticColumnValue(colName)} AS ${quoteIdentifier(alias)}`);
+                }
+                else {
+                    // Regular physical column.
+                    // FK columns like author_ID are NOT in the CDS runtime model elements
+                    // (only in cds.compile.for.sql), but they ARE physical DB columns.
+                    // Only suppress a column if the model explicitly marks it virtual/association.
+                    const element = baseTarget?.elements?.[colName];
+                    const explicitlyNonPhysical = element !== undefined &&
+                        (!!element.virtual || !!element.target || !element.type);
+                    if (explicitlyNonPhysical) {
+                        baseColumns.push(`${syntheticColumnValue(colName)} AS ${quoteIdentifier(alias)}`);
+                    }
+                    else {
+                        baseColumns.push(`${baseAlias}.${toPhysicalIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+                    }
+                }
+            }
+            else if (col === '*' || (typeof col === 'string' && col === '*')) {
+                // CAP wildcard column in a JOIN query — expand to qualified base columns to
+                // avoid "ambiguous column name" errors when both tables share column names.
+                if (baseTarget?.elements) {
+                    const wildcardCols = [];
+                    for (const [elName, el] of Object.entries(baseTarget.elements)) {
+                        if (el.virtual || el.target)
+                            continue;
+                        // Only suppress synthetic draft columns on active-entity (non-draft) tables;
+                        // on draft tables they are physical BOOLEAN columns.
+                        if (!isDraft && isSyntheticDraftColumn(elName))
+                            continue;
+                        // Note: do NOT filter on !el.type — projection elements may lack a direct
+                        // type annotation while still being valid physical columns.
+                        const physName = el['@cds.persistence.name'] ?? toPhysicalIdentifier(elName);
+                        wildcardCols.push(`${baseAlias}.${physName} AS ${quoteIdentifier(elName)}`);
+                    }
+                    if (wildcardCols.length > 0) {
+                        baseColumns.push(...wildcardCols);
+                    }
+                    else {
+                        // Elements exist but none qualify — fall back to qualified wildcard
+                        baseColumns.push(`${baseAlias}.*`);
+                    }
+                }
+                else {
+                    baseColumns.push(`${baseAlias}.*`); // qualified wildcard avoids ambiguity
+                }
+            }
+            else {
+                baseColumns.push(translateColumn(col));
+            }
+        }
+    }
+    return { baseColumns, expandColumns, joins };
+}
+/**
+ * Emit NULL AS "prefix_col" for every leaf column in an expand spec.
+ * Used when the association has no physical FK on the base table
+ * (e.g. DraftAdministrativeData on an active-entity query).
+ */
+function collectNullExpandColumns(columns, pathPrefix, expandColumns) {
+    for (const col of columns) {
+        if (!col.ref)
+            continue;
+        const colName = col.ref[col.ref.length - 1];
+        if (col.expand) {
+            collectNullExpandColumns(col.expand, `${pathPrefix}__${colName}`, expandColumns);
+        }
+        else {
+            const alias = col.as || `${pathPrefix}__${colName}`;
+            expandColumns.push(`NULL AS ${quoteIdentifier(alias)}`);
+        }
+    }
+}
+function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, expandColumns, credentials, nextAlias, parentTarget, params = []) {
+    // If expand columns is a wildcard, expand all physical columns of the target entity.
+    if (columns.length === 1 && columns[0] === '*') {
+        if (parentTarget?.elements) {
+            const wildcardCols = [];
+            for (const [elName, el] of Object.entries(parentTarget.elements)) {
+                if (el.virtual || el.target)
+                    continue;
+                // Note: do NOT filter on !el.type — projection elements may lack a direct type.
+                const physName = el['@cds.persistence.name'] ?? toPhysicalIdentifier(elName);
+                wildcardCols.push(`${parentAlias}.${physName} AS ${quoteIdentifier(`${pathPrefix}__${elName}`)}`);
+            }
+            if (wildcardCols.length > 0) {
+                expandColumns.push(...wildcardCols);
+            }
+            else {
+                expandColumns.push(`${parentAlias}.*`);
+            }
+        }
+        else {
+            expandColumns.push(`${parentAlias}.*`);
+        }
+        return;
+    }
+    for (const col of columns) {
+        // Handle xpr (expression) columns — e.g. lean-draft.js injects CASE expressions
+        // for InProcessByUser timeout logic.  Translate to SQL expression.
+        if (col.xpr && col.as) {
+            const alias = `${pathPrefix}__${col.as}`;
+            const xprSQL = xprToSQL(col.xpr, parentAlias, params);
+            expandColumns.push(`${xprSQL} AS ${quoteIdentifier(alias)}`);
+            continue;
+        }
+        if (!col.ref)
+            continue;
+        const colName = col.ref[col.ref.length - 1];
+        if (col.expand) {
+            const nestedAssoc = colName;
+            const nestedAlias = nextAlias();
+            const nestedTarget = resolveAssociationTargetName(parentTarget, nestedAssoc)
+                || (nestedAssoc.charAt(0).toUpperCase() + nestedAssoc.slice(1));
+            const nestedTable = qualifyName(nestedTarget, credentials);
+            const nestedFK = resolveForeignKey(parentTarget, nestedAssoc);
+            const nestedTargetKey = resolveTargetKey(parentTarget, nestedAssoc);
+            joins.push(`LEFT JOIN ${nestedTable} AS ${nestedAlias} ON ${parentAlias}.${toPhysicalIdentifier(nestedFK)} = ${nestedAlias}.${toPhysicalIdentifier(nestedTargetKey)}`);
+            collectNestedExpandColumns(col.expand, `${pathPrefix}__${nestedAssoc}`, nestedAlias, joins, expandColumns, credentials, nextAlias, getDefinitionForEntity(nestedTarget), params);
+            continue;
+        }
+        const alias = `${pathPrefix}__${colName}`;
+        expandColumns.push(`${parentAlias}.${toPhysicalIdentifier(colName)} AS ${quoteIdentifier(alias)}`);
+    }
+}
+/**
+ * Translate a CQN xpr (expression array) to SQL.
+ * Handles CASE/WHEN/THEN/ELSE/END, comparisons, column refs, and literal values.
+ * Column refs are qualified with `tableAlias`.
+ */
+function xprToSQL(xpr, tableAlias, params) {
+    const parts = [];
+    for (const part of xpr) {
+        if (typeof part === 'string') {
+            // SQL keyword or operator — uppercase it
+            parts.push(part.toUpperCase());
+        }
+        else if (part && typeof part === 'object') {
+            if (Array.isArray(part.ref)) {
+                const colName = part.ref[part.ref.length - 1];
+                parts.push(`${tableAlias}.${toPhysicalIdentifier(colName)}`);
+            }
+            else if ('val' in part) {
+                params.push(part.val);
+                parts.push(placeholder());
+            }
+        }
+    }
+    return parts.join(' ');
+}
+function isLikelyToMany(associationName, baseTarget) {
+    const assoc = baseTarget?.elements?.[associationName];
+    if (assoc) {
+        if (assoc.is2many)
+            return true;
+        if (assoc.cardinality?.max === '*')
+            return true;
+        // Found in CDS metadata — definitively not to-many
+        return false;
+    }
+    // Heuristic fallback when no CDS metadata is present
+    return associationName.endsWith('s');
+}
+function singularize(name) {
+    return name.endsWith('s') ? name.slice(0, -1) : name;
+}
+/**
+ * Translate FROM clause
+ */
+function translateFrom(from, credentials, target) {
+    if (from.ref) {
+        const tableName = resolveTableNameFromRef(from.ref, target);
+        const qualified = qualifyName(tableName, credentials);
+        if (from.as) {
+            return `${qualified} AS ${quoteIdentifier(from.as)}`;
+        }
+        return qualified;
+    }
+    throw new Error('Invalid FROM clause');
+}
+/**
+ * Translate column specification
+ */
+function translateColumn(col) {
+    if (typeof col === 'string')
+        return col;
+    if (col.ref) {
+        if (col.ref.length > 1 && isSyntheticDraftColumn(String(col.ref[0]))) {
+            // Navigation path through a synthetic draft association — return NULL
+            const alias = col.as || col.ref[col.ref.length - 1];
+            return `NULL AS ${quoteIdentifier(alias)}`;
+        }
+        const colName = col.ref.map(part => toPhysicalIdentifier(part)).join('.');
+        if (col.as) {
+            return `${colName} AS ${quoteIdentifier(col.as)}`;
+        }
+        return colName;
+    }
+    if (col.func) {
+        const funcCall = translateColumnFunc(col);
+        if (col.as) {
+            return `${funcCall} AS ${quoteIdentifier(col.as)}`;
+        }
+        return funcCall;
+    }
+    if (col && typeof col === 'object' && 'val' in col) {
+        // Literal value — must be properly quoted and aliased for valid SQL
+        let expr;
+        if (col.val === null || col.val === undefined) {
+            expr = 'NULL';
+        }
+        else if (typeof col.val === 'boolean') {
+            expr = col.val ? 'TRUE' : 'FALSE';
+        }
+        else if (typeof col.val === 'string') {
+            // Quote the string literal (escape single quotes)
+            expr = `'${String(col.val).replace(/'/g, "''")}'`;
+        }
+        else {
+            expr = String(col.val);
+        }
+        if (col.as) {
+            return `${expr} AS ${quoteIdentifier(col.as)}`;
+        }
+        return expr;
+    }
+    return '*';
+}
+/**
+ * Translate column function
+ */
+function translateColumnFunc(col) {
+    const funcName = col.func.toUpperCase();
+    if (funcName === 'COUNT' && (!col.args || col.args.length === 0)) {
+        return 'COUNT(*)';
+    }
+    if (col.args && col.args.length > 0) {
+        const args = col.args.map(arg => {
+            if (arg.ref) {
+                return arg.ref.map((p) => quoteIdentifier(p)).join('.');
+            }
+            return '*';
+        }).join(', ');
+        return `${funcName}(${args})`;
+    }
+    return `${funcName}()`;
+}
+/**
+ * Translate GROUP BY
+ */
+function translateGroupBy(groupBy) {
+    if (groupBy.ref) {
+        return groupBy.ref.map((part) => quoteIdentifier(part)).join('.');
+    }
+    return String(groupBy);
+}
+/**
+ * Translate INSERT
+ */
+function translateInsert(insert, credentials, params, context) {
+    // Prefer context.target.name over insert.into: CAP may pass a more specific
+    // target (e.g. "E2ETestService.Books.drafts") while insert.into still holds
+    // the base service entity ("E2ETestService.Books"), which would follow the
+    // projection chain to the wrong physical table.
+    const entityName = resolveDMLEntityName(context?.target?.name, insert.into);
+    const tableName = qualifyName(resolveEntityName(entityName, context?.target), credentials);
+    if (insert.entries && insert.entries.length > 0) {
+        // Bulk insert from entries.
+        // Filter out columns that don't have a physical mapping on the target entity
+        // (e.g. DraftMessages on the active Books table during draftActivate).
+        const targetElements = context?.target?.elements;
+        const firstEntry = insert.entries[0];
+        const allCols = Object.keys(firstEntry);
+        const columns = targetElements
+            ? allCols.filter(col => {
+                const el = targetElements[col];
+                // Keep the column if: no element metadata (unknown → keep for safety),
+                // or element exists with a type (physical column), but not virtual/association.
+                if (!el)
+                    return false; // element not in target model — skip
+                if (el.virtual || el.isAssociation)
+                    return false;
+                return true;
+            })
+            : allCols;
+        const quotedCols = columns.map(c => toPhysicalIdentifier(c));
+        const valueSets = [];
+        for (const entry of insert.entries) {
+            const values = columns.map(col => {
+                params.push(entry[col]);
+                return placeholder();
+            });
+            valueSets.push(`(${values.join(', ')})`);
+        }
+        const sql = `INSERT INTO ${tableName} (${quotedCols.join(', ')}) VALUES ${valueSets.join(', ')}`;
+        return { sql, params };
+    }
+    else if (insert.columns && insert.values) {
+        // Single insert with columns and values
+        const quotedCols = insert.columns.map(c => toPhysicalIdentifier(c));
+        const valuePlaceholders = insert.values.map(v => {
+            params.push(v);
+            return placeholder();
+        });
+        const sql = `INSERT INTO ${tableName} (${quotedCols.join(', ')}) VALUES (${valuePlaceholders.join(', ')})`;
+        return { sql, params };
+    }
+    else if (insert.rows) {
+        // Multiple rows
+        const quotedCols = insert.columns?.map(c => toPhysicalIdentifier(c)) || [];
+        const valueSets = [];
+        for (const row of insert.rows) {
+            const values = row.map((v) => {
+                params.push(v);
+                return placeholder();
+            });
+            valueSets.push(`(${values.join(', ')})`);
+        }
+        const sql = `INSERT INTO ${tableName} (${quotedCols.join(', ')}) VALUES ${valueSets.join(', ')}`;
+        return { sql, params };
+    }
+    throw new Error('Invalid INSERT statement');
+}
+/**
+ * Translate UPDATE
+ */
+function translateUpdate(update, credentials, params, context) {
+    const entityName = resolveDMLEntityName(context?.target?.name, update.entity);
+    const tableName = qualifyName(resolveEntityName(entityName, context?.target), credentials);
+    if (!update.data) {
+        throw new Error('UPDATE requires data');
+    }
+    const setClauses = [];
+    for (const [key, value] of Object.entries(update.data)) {
+        params.push(value);
+        setClauses.push(`${toPhysicalIdentifier(key)} = ${placeholder()}`);
+    }
+    let sql = `UPDATE ${tableName} SET ${setClauses.join(', ')}`;
+    // WHERE — may be in update.where OR embedded in the entity reference as
+    // { ref: [{ id: 'Entity', where: [...] }] } (used by CAP for single-entity PATCH)
+    const inlineEntityWhere = extractInlineWhere(update.entity);
+    const effectiveWhere = update.where?.length ? update.where : inlineEntityWhere;
+    if (effectiveWhere && effectiveWhere.length > 0) {
+        // Pass isDraft flag so that IsActiveEntity in WHERE is treated as a physical
+        // column on draft tables, not replaced by the constant TRUE/FALSE.
+        const isDraftCtx = !!(context?.target?.name?.endsWith('.drafts'));
+        const whereClause = translateFilter(effectiveWhere, params, undefined, isDraftCtx);
+        if (whereClause) {
+            sql += ` WHERE ${whereClause}`;
+        }
+    }
+    return { sql, params };
+}
+/**
+ * Translate DELETE
+ */
+function translateDelete(del, credentials, params, context) {
+    const entityName = resolveDMLEntityName(context?.target?.name, del.from);
+    const tableName = qualifyName(resolveEntityName(entityName, context?.target), credentials);
+    let sql = `DELETE FROM ${tableName}`;
+    // WHERE — may be in del.where OR embedded in the from reference
+    const inlineFromWhere = extractInlineWhere(del.from);
+    const effectiveWhere = del.where?.length ? del.where : inlineFromWhere;
+    if (effectiveWhere && effectiveWhere.length > 0) {
+        const isDraftCtx = !!(context?.target?.name?.endsWith('.drafts'));
+        const whereClause = translateFilter(effectiveWhere, params, undefined, isDraftCtx);
+        if (whereClause) {
+            sql += ` WHERE ${whereClause}`;
+        }
+    }
+    return { sql, params };
+}
+/**
+ * Generate MERGE (UPSERT) statement
+ */
+export function generateMerge(tableName, keys, data, credentials) {
+    const params = [];
+    const qualified = qualifyName(tableName, credentials);
+    const allColumns = Object.keys(data);
+    const quotedKeys = keys.map(k => quoteIdentifier(k));
+    const quotedCols = allColumns.map(c => quoteIdentifier(c));
+    // VALUES clause for USING
+    const valuePlaceholders = allColumns.map(col => {
+        params.push(data[col]);
+        return placeholder();
+    });
+    // ON clause (match on keys)
+    const onConditions = quotedKeys.map(key => `target.${key} = source.${key}`).join(' AND ');
+    // UPDATE SET clause (all columns except keys)
+    const updateCols = allColumns.filter(col => !keys.includes(col));
+    const updateSetClauses = updateCols.map(col => {
+        const quoted = quoteIdentifier(col);
+        return `${quoted} = source.${quoted}`;
+    });
+    let sql = `MERGE INTO ${qualified} AS target\n`;
+    sql += `USING (SELECT ${quotedCols.map((col, idx) => `${valuePlaceholders[idx]} AS ${col}`).join(', ')}) AS source\n`;
+    sql += `ON ${onConditions}\n`;
+    if (updateSetClauses.length > 0) {
+        sql += `WHEN MATCHED THEN UPDATE SET ${updateSetClauses.join(', ')}\n`;
+    }
+    sql += `WHEN NOT MATCHED THEN INSERT (${quotedCols.join(', ')}) VALUES (${quotedCols.map(col => `source.${col}`).join(', ')})`;
+    return { sql, params };
+}
+/**
+ * Lowercase names of CAP draft columns / associations that never exist on the
+ * physical active-entity table.
+ */
+const SYNTHETIC_DRAFT_COLUMNS = new Set([
+    'isactiveentity',
+    'hasactiveentity',
+    'hasdraftentity',
+    'draftadministrativedata',
+    'draftadministrativedata_draftuuid',
+    'draftadministrativedata_id',
+    'siblingentity',
+]);
+function isSyntheticDraftColumn(colName) {
+    const lower = colName.toLowerCase();
+    if (SYNTHETIC_DRAFT_COLUMNS.has(lower))
+        return true;
+    if (lower.startsWith('draftadministrativedata_'))
+        return true;
+    if (lower.startsWith('siblingentity_'))
+        return true;
+    return false;
+}
+function isDraftTarget(target, fromRef) {
+    if (typeof target?.name === 'string' && target.name.endsWith('.drafts'))
+        return true;
+    // Also check the FROM clause ref for draft entity names
+    if (fromRef?.ref) {
+        const first = fromRef.ref[0];
+        const name = typeof first === 'string' ? first : first?.id ?? first?.name ?? '';
+        if (name.endsWith('.drafts'))
+            return true;
+    }
+    return false;
+}
+function resolveForeignKey(target, assocName) {
+    const assoc = target?.elements?.[assocName];
+    if (assoc?.keys && assoc.keys.length > 0) {
+        const targetKeyName = assoc.keys[0].ref?.[0];
+        if (targetKeyName)
+            return `${assocName}_${targetKeyName}`;
+    }
+    if (target?.elements?.[`${assocName}_ID`])
+        return `${assocName}_ID`;
+    if (target?.elements) {
+        const prefix = `${assocName}_`;
+        for (const elName of Object.keys(target.elements)) {
+            if (elName.startsWith(prefix) && !target.elements[elName].target) {
+                return elName;
+            }
+        }
+    }
+    return `${assocName}_ID`;
+}
+function resolveTargetKey(target, assocName) {
+    const assoc = target?.elements?.[assocName];
+    if (assoc?.keys && assoc.keys.length > 0) {
+        const keyName = assoc.keys[0].ref?.[0];
+        if (keyName)
+            return keyName;
+    }
+    return 'ID';
+}
+function syntheticColumnValue(colName) {
+    switch (colName.toLowerCase()) {
+        case 'isactiveentity': return 'TRUE';
+        case 'hasactiveentity': return 'FALSE';
+        case 'hasdraftentity': return 'FALSE';
+        default: return 'NULL';
+    }
+}
+/**
+ * Extract an inline WHERE predicate that CAP embeds inside the entity reference
+ * for single-entity operations, e.g.:
+ *   { ref: [{ id: 'E2ETestService.Books.drafts', where: [ID='abc', ...] }] }
+ * Returns the where array if found, otherwise undefined.
+ */
+function extractInlineWhere(cqnEntity) {
+    if (!cqnEntity || typeof cqnEntity !== 'object')
+        return undefined;
+    const ref = Array.isArray(cqnEntity.ref) ? cqnEntity.ref : undefined;
+    if (!ref)
+        return undefined;
+    const first = ref[0];
+    if (first && typeof first === 'object' && Array.isArray(first.where) && first.where.length > 0) {
+        return first.where;
+    }
+    return undefined;
+}
+function resolveDMLEntityName(targetName, cqnEntity) {
+    let cqnName;
+    if (typeof cqnEntity === 'string') {
+        cqnName = cqnEntity;
+    }
+    else if (cqnEntity && typeof cqnEntity === 'object') {
+        if (Array.isArray(cqnEntity.ref)) {
+            const first = cqnEntity.ref[0];
+            cqnName = typeof first === 'string' ? first : first?.id ?? first?.name;
+            if (cqnEntity.ref.length > 1) {
+                cqnName = cqnEntity.ref.map((r) => typeof r === 'string' ? r : r?.id ?? r?.name ?? String(r)).join('.');
+            }
+        }
+        else if (typeof cqnEntity.id === 'string') {
+            cqnName = cqnEntity.id;
+        }
+        else if (typeof cqnEntity.name === 'string') {
+            cqnName = cqnEntity.name;
+        }
+    }
+    if (targetName?.endsWith('.drafts'))
+        return targetName;
+    if (cqnName?.endsWith('.drafts'))
+        return cqnName;
+    return targetName ?? cqnName ?? String(cqnEntity);
+}
+function getDefinitionForEntity(entityName) {
+    const defs = cds.model?.definitions;
+    return defs?.[entityName];
+}
+function resolveAssociationTargetName(target, assocName) {
+    const assoc = target?.elements?.[assocName];
+    const assocTargetName = assoc?.target;
+    if (!assocTargetName)
+        return undefined;
+    return resolveEntityName(assocTargetName);
+}
+function resolveTableNameFromRef(ref, target) {
+    const first = ref[0];
+    // Single-element ref: the element is the full entity/table name.
+    // If it is a string already containing 2 dots (DB.SCHEMA.TABLE) and there is no
+    // matching CDS model definition, treat it as a pre-qualified Snowflake table name
+    // and return it as-is so qualifyName does not double-qualify it.
+    if (ref.length === 1) {
+        const name = typeof first === 'string' ? first : first?.id ?? first?.name ?? String(first);
+        if (typeof first === 'string' && (first.match(/\./g) ?? []).length === 2 && !getDefinitionForEntity(first)) {
+            return first;
+        }
+        return resolveEntityName(name, target);
+    }
+    // Multi-element ref: navigation path, e.g. [{id:'E2ETestService.Authors', where:[...]}, 'books'].
+    // Resolve the association target from the base entity rather than joining parts as a string.
+    if (ref.length === 2) {
+        const baseId = typeof first === 'string' ? first : first?.id ?? first?.name ?? String(first);
+        const assocName = typeof ref[1] === 'string' ? ref[1] : ref[1]?.id ?? ref[1]?.name ?? String(ref[1]);
+        const baseDef = getDefinitionForEntity(baseId);
+        if (baseDef) {
+            const assoc = baseDef.elements?.[assocName];
+            if (assoc?.target) {
+                return resolveEntityName(assoc.target);
+            }
+        }
+    }
+    const parts = ref.map((r) => typeof r === 'string' ? r : r?.id ?? r?.name ?? String(r));
+    return resolveEntityName(parts.join('.'), target);
+}
+function resolveEntityName(entityName, target) {
+    const MAX_DEPTH = 5;
+    for (let i = 0; i < MAX_DEPTH && entityName && typeof entityName === 'object'; i++) {
+        if (Array.isArray(entityName.ref)) {
+            entityName = entityName.ref.length === 1 ? entityName.ref[0] : entityName.ref.join('.');
+        }
+        else if (typeof entityName.id === 'string') {
+            entityName = entityName.id;
+        }
+        else if (typeof entityName.name === 'string') {
+            entityName = entityName.name;
+        }
+        else {
+            break;
+        }
+    }
+    if (typeof entityName !== 'string') {
+        return String(entityName);
+    }
+    // 1. Fast path: target entity already has persistence name
+    if (target?.name === entityName && target?.['@cds.persistence.name']) {
+        return target['@cds.persistence.name'];
+    }
+    const def = getDefinitionForEntity(entityName);
+    // 2. Definition has persistence name directly
+    if (def?.['@cds.persistence.name']) {
+        return def['@cds.persistence.name'];
+    }
+    // 3. Definition is a projection/view — follow the chain to the source entity.
+    //    IMPORTANT: Do NOT follow projections for .drafts entities — their physical
+    //    table name must be derived from the entity name, not the base entity.
+    if (def && !entityName.endsWith('.drafts')) {
+        const sourceRef = def.projection?.from?.ref ??
+            def.query?.SELECT?.from?.ref;
+        if (Array.isArray(sourceRef) && sourceRef.length > 0) {
+            const sourceName = sourceRef.length === 1 ? sourceRef[0] : sourceRef.join('.');
+            if (sourceName !== entityName) {
+                const sourceDef = getDefinitionForEntity(sourceName);
+                if (sourceDef?.['@cds.persistence.name']) {
+                    return sourceDef['@cds.persistence.name'];
+                }
+                // Source entity has no @cds.persistence.name — derive from its qualified name
+                // e.g. cap_e2e.Books → CAP_E2E_BOOKS  (matches CAP standard convention)
+                return sourceName.replace(/\./g, '_').toUpperCase();
+            }
+        }
+    }
+    // 4. If the name already contains exactly 2 dots (DB.SCHEMA.TABLE) and has no
+    //    matching CDS model definition, treat it as a pre-qualified Snowflake table
+    //    name and return it as-is so qualifyName does not double-qualify it.
+    //    e.g. CAP_E2E_DB.APP.INTEG_CQN_CRUD → returned as-is
+    if ((entityName.match(/\./g) ?? []).length === 2 && !getDefinitionForEntity(entityName)) {
+        return entityName;
+    }
+    // 5. Derive physical table name from the fully qualified entity name.
+    //    Dots are replaced by underscores and the result is uppercased — the same
+    //    convention used by @cap-js/sqlite, @cap-js/hana, and cds.compile.for.sql().
+    //    This prevents qualifyName from misinterpreting a namespace prefix as a schema.
+    //    e.g. cap_e2e.Authors → CAP_E2E_AUTHORS
+    //         E2ETestService.Books → E2ETESTSERVICE_BOOKS (service entity without projection)
+    //
+    return entityName.replace(/\./g, '_').toUpperCase();
+}
+// toPhysicalIdentifier is imported from identifiers.ts
+//# sourceMappingURL=toSQL.js.map
