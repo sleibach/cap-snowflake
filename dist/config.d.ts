@@ -30,5 +30,5 @@ export interface SnowflakeConfig {
 /**
  * Parse and validate Snowflake configuration from cds.env
  */
-export declare function getSnowflakeConfig(): SnowflakeConfig;
+export declare function getSnowflakeConfig(serviceName?: string): SnowflakeConfig;
 //# sourceMappingURL=config.d.ts.map

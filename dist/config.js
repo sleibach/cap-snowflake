@@ -5,8 +5,27 @@ import cds from '@sap/cds';
 /**
  * Parse and validate Snowflake configuration from cds.env
  */
-export function getSnowflakeConfig() {
-    const dbConfig = cds.env.requires?.db;
+export function getSnowflakeConfig(serviceName) {
+    const requires = cds.env.requires || {};
+    let dbConfig;
+    // 1. Exact match by serviceName (handles any custom db service name)
+    if (serviceName && requires[serviceName]?.kind === 'snowflake') {
+        dbConfig = requires[serviceName];
+        // 2. Primary 'db' alias
+    }
+    else if (requires.db?.kind === 'snowflake') {
+        dbConfig = requires.db;
+        // 3. Legacy 'snowflake' key
+    }
+    else if (requires.snowflake?.kind === 'snowflake') {
+        dbConfig = requires.snowflake;
+        // 4. Dynamic discovery: any entry with kind 'snowflake' (enables arbitrary service names)
+    }
+    else {
+        const found = Object.values(requires).find((v) => v && typeof v === 'object' && v.kind === 'snowflake');
+        if (found)
+            dbConfig = found;
+    }
     if (!dbConfig || dbConfig.kind !== 'snowflake') {
         throw new Error('Snowflake database configuration not found or invalid kind');
     }

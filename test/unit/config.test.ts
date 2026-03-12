@@ -5,7 +5,9 @@
 import { expect } from 'chai';
 import cds from '@sap/cds';
 
-// Helper to call getSnowflakeConfig with a given db config
+const validCreds = { account: 'a', user: 'u', auth: 'sdk', password: 'p' };
+
+// Helper: temporarily set cds.env.requires.db and call fn
 async function withConfig(db: any, fn: () => void) {
   const original = cds.env.requires?.db;
   try {
@@ -14,6 +16,17 @@ async function withConfig(db: any, fn: () => void) {
     fn();
   } finally {
     cds.env.requires.db = original;
+  }
+}
+
+// Helper: temporarily set an arbitrary requires key and call fn
+async function withRequires(key: string, cfg: any, fn: () => void) {
+  const originalRequires = cds.env.requires;
+  try {
+    cds.env.requires = { ...originalRequires, [key]: cfg };
+    fn();
+  } finally {
+    cds.env.requires = originalRequires;
   }
 }
 
@@ -101,5 +114,44 @@ describe('getSnowflakeConfig', () => {
         expect(cfg.credentials.timeout).to.equal(60);
       }
     );
+  });
+
+  it('resolves named service by serviceName (custom key)', async () => {
+    await withRequires('mydb', { kind: 'snowflake', credentials: { ...validCreds } }, () => {
+      const cfg = getSnowflakeConfig('mydb');
+      expect(cfg.credentials.account).to.equal('a');
+    });
+  });
+
+  it('named service takes precedence over db fallback', async () => {
+    const originalDb = cds.env.requires?.db;
+    try {
+      if (!cds.env.requires) cds.env.requires = {};
+      cds.env.requires.db = { kind: 'snowflake', credentials: { ...validCreds, account: 'fallback' } };
+      await withRequires('primary', { kind: 'snowflake', credentials: { ...validCreds, account: 'named' } }, () => {
+        const cfg = getSnowflakeConfig('primary');
+        expect(cfg.credentials.account).to.equal('named');
+      });
+    } finally {
+      if (cds.env.requires) cds.env.requires.db = originalDb;
+    }
+  });
+
+  it('dynamic discovery finds arbitrary-named snowflake service', async () => {
+    await withRequires('customDataStore', { kind: 'snowflake', credentials: { ...validCreds } }, () => {
+      // No serviceName passed — should discover via kind scan
+      const cfg = getSnowflakeConfig();
+      expect(cfg.credentials.account).to.equal('a');
+    });
+  });
+
+  it('throws when no snowflake service is configured', async () => {
+    const original = cds.env.requires;
+    try {
+      cds.env.requires = { someOtherService: { kind: 'hana' } } as any;
+      expect(() => getSnowflakeConfig()).to.throw(/not found/i);
+    } finally {
+      cds.env.requires = original;
+    }
   });
 });

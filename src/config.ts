@@ -35,10 +35,28 @@ export interface SnowflakeConfig {
 /**
  * Parse and validate Snowflake configuration from cds.env
  */
-export function getSnowflakeConfig(): SnowflakeConfig {
-  const dbConfig = cds.env.requires?.db;
+export function getSnowflakeConfig(serviceName?: string): SnowflakeConfig {
+  const requires = cds.env.requires || {};
+  let dbConfig;
 
-  if (!dbConfig || dbConfig.kind !== 'snowflake') {
+  // 1. Exact match by serviceName (handles any custom db service name)
+  if (serviceName && requires[serviceName]?.kind === 'snowflake') {
+    dbConfig = requires[serviceName];
+  // 2. Primary 'db' alias
+  } else if (requires.db?.kind === 'snowflake') {
+    dbConfig = requires.db;
+  // 3. Legacy 'snowflake' key
+  } else if (requires.snowflake?.kind === 'snowflake') {
+    dbConfig = requires.snowflake;
+  // 4. Dynamic discovery: any entry with kind 'snowflake' (enables arbitrary service names)
+  } else {
+    const found = Object.values(requires).find(
+      (v: any) => v && typeof v === 'object' && v.kind === 'snowflake'
+    );
+    if (found) dbConfig = found;
+  }
+
+  if (!dbConfig || (dbConfig as any).kind !== 'snowflake') {
     throw new Error('Snowflake database configuration not found or invalid kind');
   }
 

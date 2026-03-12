@@ -51,7 +51,7 @@ export class SnowflakeService extends cds.DatabaseService {
      */
     async init() {
         // Load configuration
-        const config = getSnowflakeConfig();
+        const config = getSnowflakeConfig(this.name);
         this.credentials = config.credentials;
         logInfo('Initializing Snowflake adapter', {
             account: this.credentials.account,
