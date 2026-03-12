@@ -33,3 +33,14 @@ entity WorkAssignments : temporal {
   role           : String(100);
   department     : String(100);
 }
+
+entity Catalogs : cuid, managed {
+  name  : String(100) @mandatory;
+  items : Composition of many CatalogItems on items.catalog = $self;
+}
+
+entity CatalogItems : cuid, managed {
+  catalog : Association to Catalogs;
+  title   : String(100) @mandatory;
+  price   : Decimal(10,2);
+}

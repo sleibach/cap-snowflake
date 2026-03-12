@@ -50,6 +50,12 @@ export declare class SnowflakeService extends cds.DatabaseService {
      */
     private getCustomName;
     /**
+     * Direct-call adapters used by deep-queries.js (onDeep calls this.onINSERT etc.)
+     */
+    onINSERT(req: any): Promise<any>;
+    onUPDATE(req: any): Promise<any>;
+    onDELETE(req: any): Promise<any>;
+    /**
      * Handle INSERT operations
      */
     private onInsert;
@@ -58,9 +64,13 @@ export declare class SnowflakeService extends cds.DatabaseService {
      */
     private onUpdate;
     /**
-     * Handle DELETE operations
+     * Handle DELETE operations — with cascade delete for compositions.
      */
     private onDelete;
+    /**
+     * Resolve the physical fully-qualified table name for a CDS entity.
+     */
+    private resolvePhysicalTable;
     /**
      * Handle UPSERT operations (using MERGE)
      */

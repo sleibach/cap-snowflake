@@ -1,6 +1,13 @@
 /**
  * CQN filter/where clause translation to SQL
  */
+import { SnowflakeCredentials } from '../config.js';
+export interface FilterSqlContext {
+    credentials?: SnowflakeCredentials;
+    target?: any;
+    /** Resolve a CDS entity name to its physical table name (follows projection chains) */
+    resolveTable?: (entityName: string) => string;
+}
 export interface CQNExpression {
     ref?: string[];
     val?: any;
@@ -12,7 +19,7 @@ export interface CQNExpression {
 /**
  * Translate CQN where/having expression to SQL
  */
-export declare function translateFilter(xpr: any[], params: any[], baseAlias?: string, isDraft?: boolean): string;
+export declare function translateFilter(xpr: any[], params: any[], baseAlias?: string, isDraft?: boolean, sqlContext?: FilterSqlContext): string;
 /**
  * Translate CAP $search expression to ILIKE SQL conditions over searchable string columns.
  *

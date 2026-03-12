@@ -15,4 +15,7 @@ service E2ETestService {
 
 
   action submitOrder(book: UUID, quantity: Integer) returns Orders;
+
+  entity Catalogs     as projection on db.Catalogs;
+  entity CatalogItems as projection on db.CatalogItems;
 }

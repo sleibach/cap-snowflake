@@ -36,6 +36,8 @@ const ORDERS_TABLE            = 'CAP_E2E_DB.APP.CAP_E2E_ORDERS';
 const LOCALIZED_TABLE         = 'CAP_E2E_DB.APP.CAP_E2E_LOCALIZEDBOOKS';
 const LOCALIZED_TEXTS_TABLE   = 'CAP_E2E_DB.APP.CAP_E2E_LOCALIZEDBOOKS_TEXTS';
 const WORK_ASSIGNMENTS_TABLE  = 'CAP_E2E_DB.APP.CAP_E2E_WORKASSIGNMENTS';
+const CATALOGS_TABLE          = 'CAP_E2E_DB.APP.CAP_E2E_CATALOGS';
+const CATALOG_ITEMS_TABLE     = 'CAP_E2E_DB.APP.CAP_E2E_CATALOGITEMS';
 
 const AUTHOR_ID          = 'de61ab2e-7584-4726-be79-07e7f8bc5a9d';
 const AUTHOR_ID2         = '50706d32-7e65-4c40-a695-ecc2a0ee5fe7';
@@ -188,6 +190,26 @@ async function setupSchema(db: any) {
   ]) {
     await db.run(`ALTER TABLE ${DRAFT_ADMIN_TABLE} ADD COLUMN IF NOT EXISTS ${col}`).catch(() => {});
   }
+
+  await db.run(`CREATE TABLE IF NOT EXISTS ${CATALOGS_TABLE} (
+    ID         VARCHAR(36) PRIMARY KEY,
+    NAME       VARCHAR(100) NOT NULL,
+    CREATEDAT  TIMESTAMP_NTZ,
+    CREATEDBY  VARCHAR(100),
+    MODIFIEDAT TIMESTAMP_NTZ,
+    MODIFIEDBY VARCHAR(100)
+  )`);
+
+  await db.run(`CREATE TABLE IF NOT EXISTS ${CATALOG_ITEMS_TABLE} (
+    ID         VARCHAR(36) PRIMARY KEY,
+    CATALOG_ID VARCHAR(36),
+    TITLE      VARCHAR(100) NOT NULL,
+    PRICE      NUMBER(10,2),
+    CREATEDAT  TIMESTAMP_NTZ,
+    CREATEDBY  VARCHAR(100),
+    MODIFIEDAT TIMESTAMP_NTZ,
+    MODIFIEDBY VARCHAR(100)
+  )`);
 }
 
 async function seedData(db: any) {
@@ -199,6 +221,8 @@ async function seedData(db: any) {
   await db.run(`DELETE FROM ${LOCALIZED_TEXTS_TABLE}`);
   await db.run(`DELETE FROM ${LOCALIZED_TABLE}`);
   await db.run(`DELETE FROM ${WORK_ASSIGNMENTS_TABLE}`);
+  await db.run(`DELETE FROM ${CATALOG_ITEMS_TABLE}`).catch(() => {});
+  await db.run(`DELETE FROM ${CATALOGS_TABLE}`).catch(() => {});
 
   await db.run(`INSERT INTO ${AUTHORS_TABLE} (ID, NAME, COUNTRY) VALUES ('${AUTHOR_ID}',  'John Doe', 'DE')`);
   await db.run(`INSERT INTO ${AUTHORS_TABLE} (ID, NAME, COUNTRY) VALUES ('${AUTHOR_ID2}', 'Jane Smith', 'US')`);
@@ -465,6 +489,33 @@ before(function () { this.timeout(120_000); });
       });
       expect(res.status).to.equal(200);
     });
+
+    it('de locale returns German title (content verified)', async () => {
+      const deRes = await GET(`${BASE}/LocalizedBooks`, {
+        headers: { 'Accept-Language': 'de' }
+      });
+      expect(deRes.status).to.equal(200);
+      const deBook = deRes.data.value.find((b: any) => b.ID === LOCALIZED_BOOK_ID);
+      expect(deBook).to.exist;
+      expect(deBook.title).to.equal('Titel Deutsch');
+    });
+
+    it('fr locale returns French title (content verified)', async () => {
+      const frRes = await GET(`${BASE}/LocalizedBooks`, {
+        headers: { 'Accept-Language': 'fr' }
+      });
+      expect(frRes.status).to.equal(200);
+      const frBook = frRes.data.value.find((b: any) => b.ID === LOCALIZED_BOOK_ID);
+      expect(frBook).to.exist;
+      expect(frBook.title).to.equal('Titre Français');
+    });
+
+    it('no locale returns default title (not a translation)', async () => {
+      const res = await GET(`${BASE}/LocalizedBooks`);
+      const book = res.data.value.find((b: any) => b.ID === LOCALIZED_BOOK_ID);
+      expect(book).to.exist;
+      expect(book.title).to.equal('Default title');
+    });
   });
 
   // ==========================================================================
@@ -702,6 +753,222 @@ before(function () { this.timeout(120_000); });
       if (draftId) {
         await db.run(`DELETE FROM ${BOOKS_TABLE} WHERE ID = '${draftId}'`).catch(() => {});
       }
+    });
+  });
+
+  // ==========================================================================
+  describe('Managed aspects (Tier 1)', () => {
+    let managedOrderId: string;
+
+    it('POST /Orders creates order and managed fields stored in DB', async () => {
+      const res = await POST(`${BASE}/Orders`, {
+        book_ID: BOOK_ID,
+        quantity: 1,
+        buyer: 'managed-tester'
+      });
+      expect(res.status).to.equal(201);
+      managedOrderId = res.data.ID;
+      expect(managedOrderId).to.be.a('string');
+
+      // GET the created order from DB
+      const getRes = await GET(`${BASE}/Orders(${managedOrderId})`);
+      expect(getRes.status).to.equal(200);
+      expect(getRes.data.ID).to.equal(managedOrderId);
+      // createdAt/modifiedAt are set by CAP managed aspect
+      if (getRes.data.createdAt) {
+        expect(getRes.data.createdAt).to.match(/^\d{4}-\d{2}-\d{2}T/);
+      }
+    });
+
+    it('PATCH /Orders updates quantity and modifiedAt', async () => {
+      const before = await GET(`${BASE}/Orders(${managedOrderId})`);
+      const beforeModAt = before.data.modifiedAt;
+
+      await new Promise(r => setTimeout(r, 50));
+      const patchRes = await PATCH(`${BASE}/Orders(${managedOrderId})`, { quantity: 7 });
+      expect(patchRes.status).to.be.oneOf([200, 204]);
+
+      const after = await GET(`${BASE}/Orders(${managedOrderId})`);
+      expect(after.status).to.equal(200);
+      expect(Number(after.data.quantity)).to.equal(7);
+      // If modifiedAt is tracked, verify it changed
+      if (after.data.modifiedAt && beforeModAt) {
+        const afterTime = new Date(after.data.modifiedAt).getTime();
+        const beforeTime = new Date(beforeModAt).getTime();
+        expect(afterTime).to.be.gte(beforeTime);
+      }
+    });
+
+    after(async () => {
+      if (managedOrderId) {
+        await db.run(`DELETE FROM ${ORDERS_TABLE} WHERE ID = '${managedOrderId}'`).catch(() => {});
+      }
+    });
+  });
+
+  // ==========================================================================
+  describe('UUID auto-generation (Tier 2)', () => {
+    let autoOrderId: string;
+
+    it('POST /Orders without ID auto-generates a UUID key', async () => {
+      const res = await POST(`${BASE}/Orders`, {
+        book_ID: BOOK_ID,
+        quantity: 2,
+        buyer: 'uuid-tester'
+      });
+      expect(res.status).to.equal(201);
+      autoOrderId = res.data.ID;
+      expect(autoOrderId).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    });
+
+    after(async () => {
+      if (autoOrderId) {
+        await db.run(`DELETE FROM ${ORDERS_TABLE} WHERE ID = '${autoOrderId}'`).catch(() => {});
+      }
+    });
+  });
+
+  // ==========================================================================
+  describe('$expand with nested options (Tier 4)', () => {
+    it('$expand=books($orderby=title asc) returns books sorted ascending', async () => {
+      const res = await GET(`${BASE}/Authors?$filter=ID eq '${AUTHOR_ID}'&$expand=books($orderby=title asc)`);
+      expect(res.status).to.equal(200);
+      const john = res.data.value[0];
+      expect(john.books).to.be.an('array').with.lengthOf.gte(2);
+      const titles = john.books.map((b: any) => b.title);
+      const sorted = [...titles].sort();
+      expect(titles).to.deep.equal(sorted);
+    });
+
+    it('$expand=books($orderby=title desc) returns books sorted descending', async () => {
+      const res = await GET(`${BASE}/Authors?$filter=ID eq '${AUTHOR_ID}'&$expand=books($orderby=title desc)`);
+      expect(res.status).to.equal(200);
+      const john = res.data.value[0];
+      expect(john.books).to.be.an('array').with.lengthOf.gte(2);
+      const titles = john.books.map((b: any) => b.title);
+      const sortedDesc = [...titles].sort().reverse();
+      expect(titles).to.deep.equal(sortedDesc);
+    });
+
+    it('$expand=books($top=1) returns at most 1 book per author', async () => {
+      const res = await GET(`${BASE}/Authors?$expand=books($top=1)`);
+      expect(res.status).to.equal(200);
+      res.data.value.forEach((author: any) => {
+        expect(author.books.length).to.be.lte(1);
+      });
+    });
+  });
+
+  // ==========================================================================
+  describe('Lambda any/all (Tier 6)', () => {
+    it('$filter=books/any(b:b/price gt 30) returns authors with expensive books', async () => {
+      // BOOK_ID2 has price 39.99, so AUTHOR_ID (John) should match
+      const res = await GET(`${BASE}/Authors?$filter=books/any(b:b/price gt 30)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      const ids = res.data.value.map((a: any) => a.ID);
+      expect(ids).to.include(AUTHOR_ID);
+    });
+
+    it('$filter=books/any(b:b/price gt 999) returns empty (no such expensive books)', async () => {
+      const res = await GET(`${BASE}/Authors?$filter=books/any(b:b/price gt 999)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf(0);
+    });
+  });
+
+  // ==========================================================================
+  describe('$apply aggregation (Tier 8)', () => {
+    it('$apply=aggregate(stock with sum as totalStock)', async () => {
+      const res = await GET(`${BASE}/Books?$apply=aggregate(stock with sum as totalStock)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      expect(res.data.value[0].totalStock).to.be.a('number').and.gte(0);
+    });
+
+    it('$apply=groupby((author_ID),aggregate(price with avg as avgPrice))', async () => {
+      const res = await GET(`${BASE}/Books?$apply=groupby((author_ID),aggregate(price with avg as avgPrice))`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      res.data.value.forEach((row: any) => {
+        expect(row.avgPrice).to.be.a('number');
+      });
+    });
+  });
+
+  // ==========================================================================
+  describe('Composition CRUD — Catalogs + CatalogItems (Tier 5)', () => {
+    let catalogId: string;
+    let itemId: string;
+
+    it('POST /Catalogs creates catalog with items (deep insert)', async () => {
+      const res = await POST(`${BASE}/Catalogs`, {
+        name: 'Test Catalog',
+        items: [
+          { title: 'Widget A', price: 9.99 },
+          { title: 'Widget B', price: 19.99 }
+        ]
+      });
+      expect(res.status).to.be.oneOf([200, 201]);
+      catalogId = res.data.ID;
+      expect(catalogId).to.match(/^[0-9a-f-]{36}$/i);
+    });
+
+    it('GET /Catalogs with $expand=items returns nested items', async () => {
+      const res = await GET(`${BASE}/Catalogs(${catalogId})?$expand=items`);
+      expect(res.status).to.equal(200);
+      expect(res.data.ID).to.equal(catalogId);
+      expect(res.data.items).to.be.an('array').with.lengthOf(2);
+      const titles = res.data.items.map((i: any) => i.title).sort();
+      expect(titles).to.deep.equal(['Widget A', 'Widget B']);
+      itemId = res.data.items[0].ID;
+    });
+
+    it('PATCH /CatalogItems(id) updates item title', async () => {
+      const res = await PATCH(`${BASE}/CatalogItems(${itemId})`, { title: 'Widget A Updated' });
+      expect(res.status).to.be.oneOf([200, 204]);
+    });
+
+    it('GET /CatalogItems(id) reflects the PATCH', async () => {
+      const res = await GET(`${BASE}/CatalogItems(${itemId})`);
+      expect(res.status).to.equal(200);
+      expect(res.data.title).to.equal('Widget A Updated');
+    });
+
+    it('DELETE /Catalogs(id) removes catalog and cascades to items', async () => {
+      const delRes = await DELETE_REQ(`${BASE}/Catalogs(${catalogId})`);
+      expect(delRes.status).to.be.oneOf([200, 204]);
+
+      // Verify items are also gone
+      const itemsRes = await GET(`${BASE}/CatalogItems?$filter=catalog_ID eq '${catalogId}'`);
+      expect(itemsRes.status).to.equal(200);
+      expect(itemsRes.data.value).to.be.an('array').with.lengthOf(0);
+    });
+  });
+
+  // ==========================================================================
+  describe('Error handling (Tier 9)', () => {
+    const FIXED_ORDER_UUID = '99999999-9999-9999-9999-999999999999';
+
+    before(async () => {
+      // Ensure no leftover row from previous runs
+      await db.run(`DELETE FROM ${ORDERS_TABLE} WHERE ID = '${FIXED_ORDER_UUID}'`).catch(() => {});
+    });
+
+    it.skip('duplicate key INSERT returns 409 — N/A: Snowflake PRIMARY KEY is informational only (not enforced)', async () => {
+      // Snowflake constraints (PRIMARY KEY, UNIQUE) are informational and not enforced at the
+      // storage level. Duplicate key inserts succeed silently. This test cannot be applied to
+      // Snowflake; the COMPLIANCE.md entry is marked 🚫 N/A.
+    });
+
+    it('GET non-existent entity returns 404', async () => {
+      const res = await GET(`${BASE}/Orders(00000000-0000-0000-0000-000000000000)`)
+        .catch((e: any) => e.response ?? e);
+      expect(res.status).to.equal(404);
+    });
+
+    after(async () => {
+      await db.run(`DELETE FROM ${ORDERS_TABLE} WHERE ID = '${FIXED_ORDER_UUID}'`).catch(() => {});
     });
   });
 

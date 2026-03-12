@@ -3,14 +3,19 @@
  */
 
 import cds from '@sap/cds';
+import { createRequire } from 'node:module';
 import { getSnowflakeConfig, SnowflakeCredentials } from './config.js';
 import { SnowflakeSQLAPIClient } from './client/sqlapi.js';
 import { SnowflakeSDKClient } from './client/sdk.js';
-import { cqnToSQL, generateMerge } from './cqn/toSQL.js';
+import { cqnToSQL, generateMerge, resolveEntityName } from './cqn/toSQL.js';
+import { qualifyName, toPhysicalIdentifier } from './identifiers.js';
 import { wrapWithCount } from './cqn/pagination.js';
 import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
 import { buildDeployStatements } from './ddl/deploy.js';
+
+const _require = createRequire(import.meta.url);
+const { onDeep } = _require('@cap-js/db-service/lib/deep-queries');
 
 export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
@@ -76,6 +81,9 @@ export class SnowflakeService extends cds.DatabaseService {
       await this.sdkClient.connect();
       logInfo('Using Snowflake SDK with password authentication');
     }
+
+    // Register deep insert/update/delete middleware (handles compositions)
+    this.on(['INSERT', 'UPSERT', 'UPDATE'], onDeep.bind(this));
 
     // Register query handlers
     this.on('READ', '*', this.onRead.bind(this));
@@ -183,7 +191,7 @@ export class SnowflakeService extends cds.DatabaseService {
         // To-many expansions are returned as aggregated JSON arrays under association name.
         const toManyCol = select.columns.find((col: any) => col.expand && col.ref?.[0] === key);
         if (toManyCol) {
-          // ARRAY_AGG returns null when no rows match; normalize to empty array
+          // ARRAY_AGG returns null when no rows match; normalize to empty array.
           result[key] = value == null ? [] : value;
           continue;
         }
@@ -293,6 +301,13 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
+   * Direct-call adapters used by deep-queries.js (onDeep calls this.onINSERT etc.)
+   */
+  async onINSERT(req: any): Promise<any> { return this.onInsert(req); }
+  async onUPDATE(req: any): Promise<any> { return this.onUpdate(req); }
+  async onDELETE(req: any): Promise<any> { return this.onDelete(req); }
+
+  /**
    * Handle INSERT operations
    */
   private async onInsert(req: any): Promise<any> {
@@ -324,7 +339,8 @@ export class SnowflakeService extends cds.DatabaseService {
 
       // Return inserted entries for CAP
       if (insert.entries) {
-        return insert.entries.length === 1 ? insert.entries[0] : insert.entries;
+        const result = insert.entries.length === 1 ? insert.entries[0] : insert.entries;
+        return result;
       }
 
       return req.data;
@@ -359,22 +375,75 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
-   * Handle DELETE operations
+   * Handle DELETE operations — with cascade delete for compositions.
    */
   private async onDelete(req: any): Promise<number> {
     const query = req.query;
     try {
       const del = query.DELETE;
-      
+
       if (!del) {
         throw new Error('Invalid DELETE query');
       }
 
-      // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
-      // Note: Compositions trigger cascading deletes automatically via CAP
+      const target = req.target;
+      const compositions: Record<string, any> = target?.compositions ?? {};
 
-      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
+      // Cascade delete: delete child composition rows BEFORE the parent.
+      for (const [, comp] of Object.entries(compositions)) {
+        const childTarget = (comp as any)._target;
+        if (!childTarget || childTarget['@cds.persistence.skip'] === true) continue;
 
+        // Find the FK column name on the child table.
+        // Composition 'on' conditions look like: [{ ref: ['items', 'catalog_ID'] }, '=', { ref: ['$self', 'ID'] }]
+        // Or for association-based: [{ ref: ['items', 'catalog'] }, '=', { ref: ['$self'] }]
+        // where 'catalog' is the association name; the physical FK column is 'catalog_ID'.
+        const onCondition: any[] = (comp as any).on ?? [];
+        let childFKName = '';
+        for (let i = 0; i < onCondition.length; i++) {
+          const el = onCondition[i];
+          if (el?.ref && el.ref.length === 2 && typeof el.ref[1] === 'string') {
+            const candidate = el.ref[1];
+            // If the child entity has an element with this exact name AND it's an association,
+            // the physical FK column is candidate + '_ID'.
+            const childEl = childTarget?.elements?.[candidate];
+            if (childEl?.type === 'cds.Association' || childEl?.isAssociation) {
+              childFKName = candidate + '_ID';
+            } else {
+              childFKName = candidate;
+            }
+            break;
+          }
+        }
+        // Fallback: look for any association element on the child that targets the parent
+        if (!childFKName && childTarget?.elements) {
+          const parentName = target?.name ?? '';
+          for (const [elName, el] of Object.entries(childTarget.elements as Record<string, any>)) {
+            if ((el?.isAssociation || el?.type === 'cds.Association') && el?.target === parentName) {
+              childFKName = elName + '_ID';
+              break;
+            }
+          }
+        }
+        if (!childFKName) childFKName = 'ID';
+
+        const parentTable = this.resolvePhysicalTable(target);
+        const childTable = this.resolvePhysicalTable(childTarget);
+
+        // Generate: DELETE FROM childTable WHERE fkCol IN (SELECT ID FROM parentTable WHERE <parent.where>)
+        const { sql: parentSql, params: parentParams } = cqnToSQL(query, this.credentials, { target });
+        const whereIdx = parentSql.indexOf(' WHERE ');
+        if (whereIdx !== -1) {
+          const whereClause = parentSql.substring(whereIdx + 7);
+          const childDeleteSQL = `DELETE FROM ${childTable} WHERE ${toPhysicalIdentifier(childFKName)} IN (SELECT ID FROM ${parentTable} WHERE ${whereClause})`;
+          await this.execute(childDeleteSQL, parentParams);
+        } else {
+          // No WHERE on parent delete — delete all children
+          await this.execute(`DELETE FROM ${childTable}`, []);
+        }
+      }
+
+      const { sql, params } = cqnToSQL(query, this.credentials, { target });
       const result = await this.execute(sql, params);
 
       // Snowflake DML returns a metadata row; result.length > 0 means the statement ran.
@@ -384,6 +453,19 @@ export class SnowflakeService extends cds.DatabaseService {
       logError('DELETE operation failed', error);
       throw normalizeError(error);
     }
+  }
+
+  /**
+   * Resolve the physical fully-qualified table name for a CDS entity.
+   */
+  private resolvePhysicalTable(target: any): string {
+    const entityName = target?.name ?? '';
+    const physicalName = resolveEntityName(entityName, target);
+    // resolveEntityName may return the service-prefixed name (e.g. "E2ETestService.CatalogItems")
+    // if no @cds.persistence.name annotation and no projection chain is found.
+    // Extract the last segment and let qualifyName add db/schema prefix.
+    const shortName = physicalName.includes('.') ? physicalName.split('.').pop()! : physicalName;
+    return qualifyName(shortName, this.credentials);
   }
 
   /**
@@ -442,7 +524,7 @@ export class SnowflakeService extends cds.DatabaseService {
    * Execute SQL statement
    */
   private async execute(sql: string, params?: any[]): Promise<any[]> {
-
+    if (process.env.DEBUG_SQL) { const { appendFileSync } = await import('node:fs'); appendFileSync('/tmp/sql-debug.log', `[SQL] ${sql}\n[P] ${JSON.stringify(params)}\n\n`); }
     if (this.sqlApiClient) {
       const result = await this.sqlApiClient.execute(sql, params);
       return SnowflakeSQLAPIClient.parseRows(result);

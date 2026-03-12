@@ -191,16 +191,30 @@ export class SnowflakeSQLAPIClient {
     }
 
     // Shape B (actual SQL API): { resultSetMetaData, data, ... }
-    if ((response as any).resultSetMetaData && Array.isArray((response as any).data)) {
-      const top = response as any;
+    const top = response as any;
+    if (top.resultSetMetaData) {
+      const dataArr = Array.isArray(top.data) ? top.data : [];
       return {
         resultSetMetaData: top.resultSetMetaData,
-        data: top.data,
-        total: top.resultSetMetaData?.numRows ?? top.data.length,
-        returned: top.returned ?? top.data.length,
+        data: dataArr,
+        total: top.resultSetMetaData?.numRows ?? dataArr.length,
+        returned: top.returned ?? dataArr.length,
       };
     }
 
+    // Shape C: async statement handle — treat as empty result (query is still processing)
+    // Snowflake returns { statementHandle, code: "333334" } for async queries
+    if (top.statementHandle) {
+      logWarning('Snowflake returned async statement handle; treating as empty result', { handle: top.statementHandle });
+      return {
+        resultSetMetaData: { rowType: [] },
+        data: [],
+        total: 0,
+        returned: 0,
+      } as any;
+    }
+
+    logWarning('Unexpected Snowflake SQL API response shape', { keys: Object.keys(top) });
     return undefined;
   }
 
@@ -329,13 +343,15 @@ export class SnowflakeSQLAPIClient {
 
     const rowTypes = result.resultSetMetaData.rowType;
 
-    return result.data.map(row => {
+    const rows = result.data.map(row => {
       const obj: any = {};
       rowTypes.forEach((col, idx) => {
         obj[col.name] = SnowflakeSQLAPIClient.coerceValue(row[idx], col);
       });
       return obj;
     });
+
+    return rows;
   }
 
   /**

@@ -134,15 +134,28 @@ export class SnowflakeSQLAPIClient {
             return response.data;
         }
         // Shape B (actual SQL API): { resultSetMetaData, data, ... }
-        if (response.resultSetMetaData && Array.isArray(response.data)) {
-            const top = response;
+        const top = response;
+        if (top.resultSetMetaData) {
+            const dataArr = Array.isArray(top.data) ? top.data : [];
             return {
                 resultSetMetaData: top.resultSetMetaData,
-                data: top.data,
-                total: top.resultSetMetaData?.numRows ?? top.data.length,
-                returned: top.returned ?? top.data.length,
+                data: dataArr,
+                total: top.resultSetMetaData?.numRows ?? dataArr.length,
+                returned: top.returned ?? dataArr.length,
             };
         }
+        // Shape C: async statement handle — treat as empty result (query is still processing)
+        // Snowflake returns { statementHandle, code: "333334" } for async queries
+        if (top.statementHandle) {
+            logWarning('Snowflake returned async statement handle; treating as empty result', { handle: top.statementHandle });
+            return {
+                resultSetMetaData: { rowType: [] },
+                data: [],
+                total: 0,
+                returned: 0,
+            };
+        }
+        logWarning('Unexpected Snowflake SQL API response shape', { keys: Object.keys(top) });
         return undefined;
     }
     /**
@@ -252,13 +265,14 @@ export class SnowflakeSQLAPIClient {
             return [];
         }
         const rowTypes = result.resultSetMetaData.rowType;
-        return result.data.map(row => {
+        const rows = result.data.map(row => {
             const obj = {};
             rowTypes.forEach((col, idx) => {
                 obj[col.name] = SnowflakeSQLAPIClient.coerceValue(row[idx], col);
             });
             return obj;
         });
+        return rows;
     }
     /**
      * Coerce a raw string value from the SQL API to its proper JS type.

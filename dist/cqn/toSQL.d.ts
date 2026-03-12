@@ -73,5 +73,6 @@ export declare function cqnToSQL(cqn: CQN, credentials: SnowflakeCredentials, co
  * Generate MERGE (UPSERT) statement
  */
 export declare function generateMerge(tableName: string, keys: string[], data: any, credentials: SnowflakeCredentials): SQLResult;
+export declare function resolveEntityName(entityName: any, target?: any): string;
 export {};
 //# sourceMappingURL=toSQL.d.ts.map

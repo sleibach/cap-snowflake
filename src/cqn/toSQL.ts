@@ -4,7 +4,7 @@
 
 import { quoteIdentifier, qualifyName, toPhysicalIdentifier } from '../identifiers.js';
 import { placeholder } from '../params.js';
-import { translateFilter, translateSearch } from './filters.js';
+import { translateFilter, translateSearch, FilterSqlContext } from './filters.js';
 import { translateOrderBy } from './orderby.js';
 import { translatePagination } from './pagination.js';
 import { SnowflakeCredentials } from '../config.js';
@@ -135,7 +135,7 @@ function translateSelect(
       sql += ` ${cols}`;
       
       // FROM with joins
-      let fromClause = translateFrom(select.from, credentials, context?.target);
+      let fromClause = translateFrom(select.from, credentials, context?.target, params);
       if (!select.from.as) {
         fromClause += ' AS base';
       }
@@ -165,11 +165,11 @@ function translateSelect(
         return translateColumn(col);
       }).join(', ');
       sql += ` ${cols}`;
-      sql += ` FROM ${translateFrom(select.from, credentials, context?.target)}`;
+      sql += ` FROM ${translateFrom(select.from, credentials, context?.target, params)}`;
     }
   } else {
     sql += ' *';
-    sql += ` FROM ${translateFrom(select.from, credentials, context?.target)}`;
+    sql += ` FROM ${translateFrom(select.from, credentials, context?.target, params)}`;
   }
 
   // WHERE + $search — use base alias when JOINs are present to avoid ambiguity
@@ -186,7 +186,8 @@ function translateSelect(
       : undefined;
   const effectiveWhere = (select.where && select.where.length > 0) ? select.where : inlineFromWhere;
   if (effectiveWhere && effectiveWhere.length > 0) {
-    const whereClause = translateFilter(effectiveWhere, params, filterAlias, isDraftQuery);
+    const filterCtx: FilterSqlContext = { credentials, target: context?.target, resolveTable: resolveEntityName };
+    const whereClause = translateFilter(effectiveWhere, params, filterAlias, isDraftQuery, filterCtx);
     if (whereClause) {
       sql += ` WHERE ${whereClause}`;
       hasWhere = true;
@@ -281,14 +282,12 @@ function processColumnsWithExpand(
           const extraWhere = translateFilter(expandWhere, _params);
           if (extraWhere) subWhere += ` AND ${extraWhere}`;
         }
-        // Build OBJECT_CONSTRUCT: use explicit key-value pairs for $select so that CDS
-        // element names (e.g. 'title') are used as JSON keys instead of Snowflake physical
-        // column names (e.g. TITLE), fixing case-mismatch in OData responses.
-        const isWildcard = expandSpec.length === 1 && (expandSpec[0] as any).ref?.[0] === '*';
+        // Build OBJECT_CONSTRUCT: use explicit key-value pairs so that CDS element names
+        // (e.g. 'title') are used as JSON keys instead of Snowflake physical column names
+        // (e.g. TITLE), fixing case-mismatch in OData responses.
+        const isWildcard = !expandSpec || expandSpec.length === 0 || (expandSpec.length === 1 && (expandSpec[0] as any) === '*') || (expandSpec.length === 1 && (expandSpec[0] as any).ref?.[0] === '*');
         let objConstruct: string;
-        if (isWildcard) {
-          objConstruct = 'OBJECT_CONSTRUCT(*)';
-        } else {
+        if (!isWildcard) {
           const pairs = expandSpec
             .filter((c: any) => c.ref)
             .map((c: any) => {
@@ -297,11 +296,42 @@ function processColumnsWithExpand(
             })
             .join(', ');
           objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
+        } else {
+          // Wildcard expand: resolve child entity elements to build explicit key-value pairs
+          // so JSON keys match CDS element names instead of Snowflake UPPERCASE column names.
+          const assocEl = baseTarget?.elements?.[assocName];
+          const childEntityName: string | undefined = assocEl?.target;
+          const childEntity = assocEl?._target
+            ?? (childEntityName ? cds.model?.definitions?.[childEntityName] : undefined);
+          if (childEntity?.elements) {
+            const pairs = Object.entries(childEntity.elements as Record<string, any>)
+              .filter(([, el]) => !el.isAssociation && !el.virtual && el['@cds.persistence.skip'] !== true)
+              .map(([elName]) => `'${elName}', ${toPhysicalIdentifier(elName)}`)
+              .join(', ');
+            objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
+          } else {
+            objConstruct = 'OBJECT_CONSTRUCT(*)';
+          }
         }
         // COALESCE ensures an empty array [] is returned instead of NULL when no rows match.
-        let subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
         const expandLimit = (col as any).limit?.rows?.val;
-        if (expandLimit) subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID LIMIT ${expandLimit}) AS tm`;
+        const expandOrderBy: any[] | undefined = (col as any).orderBy;
+        // Build WITHIN GROUP (ORDER BY ...) clause for ARRAY_AGG if orderBy present
+        let withinGroup = '';
+        if (expandOrderBy && expandOrderBy.length > 0) {
+          const orderClauses = expandOrderBy.map((item: any) => {
+            const colPart = item.ref ? item.ref.map((p: string) => toPhysicalIdentifier(p)).join('.') : String(item);
+            const dir = item.sort ? ` ${item.sort.toUpperCase()}` : '';
+            return `${colPart}${dir}`;
+          }).join(', ');
+          withinGroup = ` WITHIN GROUP (ORDER BY ${orderClauses})`;
+        }
+        let subQuery: string;
+        if (expandLimit) {
+          subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID LIMIT ${expandLimit}) AS tm`;
+        } else {
+          subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
+        }
         expandColumns.push(`(${subQuery}) AS ${quoteIdentifier(assocName)}`);
       } else {
         const joinAlias = `expand_${joinCounter++}`;
@@ -571,19 +601,127 @@ function singularize(name: string): string {
 /**
  * Translate FROM clause
  */
-function translateFrom(from: FromClause, credentials: SnowflakeCredentials, target?: any): string {
+function translateFrom(from: FromClause, credentials: SnowflakeCredentials, target?: any, params?: any[]): string {
   if (from.ref) {
+    // Locale-aware handling: when target entity has localized elements, inject dynamic locale join
+    if (params && target) {
+      const localizedSQL = buildLocalizedFromSubqueryForTarget(target, credentials, params);
+      if (localizedSQL) {
+        if (from.as) return `${localizedSQL} AS ${quoteIdentifier(from.as)}`;
+        return localizedSQL;
+      }
+    }
+    // Also handle explicit localized.* prefix (CAP sometimes uses this)
+    if (params) {
+      const firstRef = from.ref[0];
+      const refName = typeof firstRef === 'string' ? firstRef : (firstRef as any)?.id ?? (firstRef as any)?.name ?? '';
+      if (typeof refName === 'string' && refName.startsWith('localized.')) {
+        const localizedSQL = buildLocalizedFromSubquery(refName, credentials, params);
+        if (localizedSQL) {
+          if (from.as) return `${localizedSQL} AS ${quoteIdentifier(from.as)}`;
+          return localizedSQL;
+        }
+      }
+    }
+
     const tableName = resolveTableNameFromRef(from.ref, target);
     const qualified = qualifyName(tableName, credentials);
-    
+
     if (from.as) {
       return `${qualified} AS ${quoteIdentifier(from.as)}`;
     }
-    
+
     return qualified;
   }
 
   throw new Error('Invalid FROM clause');
+}
+
+/**
+ * Build a locale-aware inline subquery using the target CDS entity definition.
+ * Returns null if the entity has no localized elements.
+ */
+function buildLocalizedFromSubqueryForTarget(
+  target: any,
+  credentials: SnowflakeCredentials,
+  params: any[]
+): string | null {
+  if (!target?.elements) return null;
+
+  const localizedCols: string[] = [];
+  const keyCols: string[] = [];
+  for (const [colName, elem] of Object.entries(target.elements)) {
+    const el = elem as any;
+    if (el.key === true) keyCols.push(colName);
+    if (el.localized === true) localizedCols.push(colName);
+  }
+  if (localizedCols.length === 0 || keyCols.length === 0) return null;
+
+  // Get the physical table name from the target definition
+  const tableName = resolveEntityName(target.name ?? target['@cds.persistence.name'], target);
+  if (!tableName) return null;
+
+  const textsName = tableName + '_TEXTS';
+  const baseTable = qualifyName(tableName, credentials);
+  const textsTable = qualifyName(textsName, credentials);
+
+  const locale = (cds.context as any)?.locale ?? 'en';
+
+  const excludeList = localizedCols.map(c => toPhysicalIdentifier(c)).join(', ');
+  const coalesceCols = localizedCols.map(c => {
+    const phys = toPhysicalIdentifier(c);
+    return `COALESCE(t.${phys}, base.${phys}) AS ${phys}`;
+  }).join(', ');
+  const joinOn = keyCols.map(k => {
+    const phys = toPhysicalIdentifier(k);
+    return `base.${phys} = t.${phys}`;
+  }).join(' AND ');
+
+  params.push(locale);
+  return `(SELECT base.* EXCLUDE (${excludeList}), ${coalesceCols} FROM ${baseTable} AS base LEFT JOIN ${textsTable} AS t ON ${joinOn} AND t.LOCALE = ?)`;
+}
+
+/**
+ * Build a locale-aware inline subquery for a localized.* entity (explicit prefix path).
+ * Returns null if the entity cannot be resolved or has no localized elements.
+ */
+function buildLocalizedFromSubquery(
+  localizedEntityName: string,
+  credentials: SnowflakeCredentials,
+  params: any[]
+): string | null {
+  const baseEntityName = localizedEntityName.slice('localized.'.length);
+  const baseDef = getDefinitionForEntity(baseEntityName);
+  if (!baseDef?.elements) return null;
+
+  const localizedCols: string[] = [];
+  const keyCols: string[] = [];
+  for (const [colName, elem] of Object.entries(baseDef.elements)) {
+    const el = elem as any;
+    if (el.key) keyCols.push(colName);
+    if (el.localized) localizedCols.push(colName);
+  }
+  if (localizedCols.length === 0 || keyCols.length === 0) return null;
+
+  const locale = (cds.context as any)?.locale ?? 'en';
+
+  const baseName = resolveEntityName(baseEntityName);
+  const textsName = baseName + '_TEXTS';
+  const baseTable = qualifyName(baseName, credentials);
+  const textsTable = qualifyName(textsName, credentials);
+
+  const excludeList = localizedCols.map(c => toPhysicalIdentifier(c)).join(', ');
+  const coalesceCols = localizedCols.map(c => {
+    const phys = toPhysicalIdentifier(c);
+    return `COALESCE(t.${phys}, base.${phys}) AS ${phys}`;
+  }).join(', ');
+  const joinOn = keyCols.map(k => {
+    const phys = toPhysicalIdentifier(k);
+    return `base.${phys} = t.${phys}`;
+  }).join(' AND ');
+
+  params.push(locale);
+  return `(SELECT base.* EXCLUDE (${excludeList}), ${coalesceCols} FROM ${baseTable} AS base LEFT JOIN ${textsTable} AS t ON ${joinOn} AND t.LOCALE = ?)`;
 }
 
 /**
@@ -647,8 +785,9 @@ function translateColumnFunc(col: ColumnSpec): string {
   if (col.args && col.args.length > 0) {
     const args = col.args.map(arg => {
       if (arg.ref) {
-        return arg.ref.map((p: string) => quoteIdentifier(p)).join('.');
+        return arg.ref.map((p: string) => toPhysicalIdentifier(p)).join('.');
       }
+      if ('val' in arg) return arg.val === null ? 'NULL' : String(arg.val);
       return '*';
     }).join(', ');
     return `${funcName}(${args})`;
@@ -662,7 +801,7 @@ function translateColumnFunc(col: ColumnSpec): string {
  */
 function translateGroupBy(groupBy: any): string {
   if (groupBy.ref) {
-    return groupBy.ref.map((part: string) => quoteIdentifier(part)).join('.');
+    return groupBy.ref.map((part: string) => toPhysicalIdentifier(part)).join('.');
   }
   return String(groupBy);
 }
@@ -1011,7 +1150,7 @@ function resolveTableNameFromRef(ref: any[], target?: any): string {
   return resolveEntityName(parts.join('.'), target);
 }
 
-function resolveEntityName(entityName: any, target?: any): string {
+export function resolveEntityName(entityName: any, target?: any): string {
   const MAX_DEPTH = 5;
   for (let i = 0; i < MAX_DEPTH && entityName && typeof entityName === 'object'; i++) {
     if (Array.isArray(entityName.ref)) {
