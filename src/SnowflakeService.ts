@@ -9,7 +9,7 @@ import { SnowflakeSQLAPIClient } from './client/sqlapi.js';
 import { SnowflakeSDKClient } from './client/sdk.js';
 import { cqnToSQL, generateMerge, resolveEntityName } from './cqn/toSQL.js';
 import { qualifyName, toPhysicalIdentifier } from './identifiers.js';
-import { wrapWithCount } from './cqn/pagination.js';
+import { wrapWithCount, stripPagination } from './cqn/pagination.js';
 import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
 import { buildDeployStatements } from './ddl/deploy.js';
@@ -131,7 +131,10 @@ export class SnowflakeService extends cds.DatabaseService {
 
       // Handle $count if requested
       if (needsCount) {
-        const countSQL = wrapWithCount(sql);
+        // Strip LIMIT/OFFSET before wrapping — the count must reflect ALL matching rows,
+        // not just the current page. wrapWithCount(sql) with a LIMIT would return the
+        // page size (e.g. 30) instead of the true total.
+        const countSQL = wrapWithCount(stripPagination(sql));
         const countResult = await this.execute(countSQL, params);
         const count = Number(countResult[0]?.count ?? countResult[0]?.COUNT ?? 0);
 

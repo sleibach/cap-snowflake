@@ -11,7 +11,12 @@ export interface PaginationOptions {
  */
 export declare function translatePagination(options: PaginationOptions): string;
 /**
- * Wrap query with COUNT
+ * Strip LIMIT / OFFSET clause from the end of a SQL string.
+ * Used to obtain the unpaginated SQL for a COUNT(*) query.
+ */
+export declare function stripPagination(sql: string): string;
+/**
+ * Wrap query with COUNT — sql must NOT contain LIMIT/OFFSET.
  */
 export declare function wrapWithCount(sql: string): string;
 //# sourceMappingURL=pagination.d.ts.map

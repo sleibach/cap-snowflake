@@ -384,11 +384,13 @@ before(function () { this.timeout(120_000); });
       expect(res.data['@odata.count']).to.be.a('number').and.gte(1);
     });
 
-    it('supports $top + $count', async () => {
+    it('supports $top + $count — @odata.count reflects total, not page size', async () => {
+      // 2 books are seeded; $top=1 returns 1 row but @odata.count must be 2 (total).
+      // Before the fix, wrapWithCount ran on the paginated SQL so count equalled $top.
       const res = await GET(`${BASE}/Books?$top=1&$count=true`);
       expect(res.status).to.equal(200);
-      expect(res.data.value).to.have.lengthOf(1);
-      expect(res.data['@odata.count']).to.be.gte(1);
+      expect(res.data.value).to.have.lengthOf(1);          // page has 1 row
+      expect(res.data['@odata.count']).to.be.gte(2);       // total is ALL rows, not just 1
     });
   });
 
