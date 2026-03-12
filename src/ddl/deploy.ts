@@ -2,8 +2,9 @@
  * DDL generation for cds deploy
  */
 
+import cds from '@sap/cds';
 import { mapCDSType } from './types.js';
-import { quoteIdentifier, qualifyName } from '../identifiers.js';
+import { qualifyName, toPhysicalIdentifier } from '../identifiers.js';
 import { SnowflakeCredentials } from '../config.js';
 import {
   extractLocalizedElements,
@@ -53,7 +54,7 @@ export function generateCreateTable(
     columns.push(columnDef);
 
     if (element.key) {
-      keys.push(quoteIdentifier(name));
+      keys.push(toPhysicalIdentifier(name));
     }
   }
 
@@ -72,8 +73,8 @@ export function generateCreateTable(
 /**
  * Generate column definition
  */
-function generateColumnDefinition(name: string, element: ElementDefinition): string {
-  const quotedName = quoteIdentifier(name);
+export function generateColumnDefinition(name: string, element: ElementDefinition): string {
+  const quotedName = toPhysicalIdentifier(name);
   const sqlType = mapCDSType(element.type, element.length, element.precision, element.scale);
   
   let def = `${quotedName} ${sqlType}`;
@@ -147,6 +148,7 @@ export function generateCreateSequence(
 
 interface DeployOptions {
   createViews?: boolean;
+  migrate?: boolean;
 }
 
 interface CSNElement {
@@ -166,6 +168,7 @@ interface CSNElement {
 interface CSNDefinition {
   kind?: string;
   query?: any;
+  projection?: any;
   elements?: Record<string, CSNElement>;
   ['@cds.persistence.skip']?: boolean;
   ['@cds.persistence.exists']?: boolean;
@@ -180,7 +183,45 @@ export function buildDeployStatements(
   credentials: SnowflakeCredentials,
   options: DeployOptions = {}
 ): string[] {
-  const definitions = model?.definitions || {};
+  // Start with the original definitions, then enrich with SQL-compiled definitions
+  // (which includes draft tables: *.drafts, DRAFT.DraftAdministrativeData).
+  // Only NEW definitions are merged in — existing ones are never overwritten so that
+  // @cds.persistence.name and other annotations remain intact.
+  const originalDefs: Record<string, any> = model?.definitions || {};
+  const definitions: Record<string, any> = { ...originalDefs };
+  try {
+    if (cds.compile?.for?.sql) {
+      const sqlModel = cds.compile.for.sql(model);
+      const sqlDefs = sqlModel?.definitions || {};
+      for (const [name, def] of Object.entries(sqlDefs)) {
+        if (!definitions[name]) {
+          // Skip common CDS / SAP framework entities — they belong to reference-data
+          // packages and should not be deployed to the application schema.
+          if (name.startsWith('sap.') || name.startsWith('cds.')) continue;
+
+          // For draft entities (*.drafts), fix the persistence name:
+          // cds.compile.for.sql() derives it from the entity path (e.g. E2ETESTSERVICE_BOOKS_DRAFTS),
+          // but CAP runtime uses the base entity's @cds.persistence.name + _DRAFTS
+          // (e.g. CAP_E2E_BOOKS_DRAFTS).  Override the annotation so the deployed
+          // table matches what the running server expects.
+          if (name.endsWith('.drafts')) {
+            const baseName = name.slice(0, -'.drafts'.length);
+            const baseDef = originalDefs[baseName] ?? originalDefs[baseName.split('.').pop()!];
+            const basePersis = baseDef?.['@cds.persistence.name'];
+            if (basePersis) {
+              const clone: any = { ...def };
+              clone['@cds.persistence.name'] = `${basePersis}_DRAFTS`;
+              definitions[name] = clone;
+              continue;
+            }
+          }
+          definitions[name] = def;
+        }
+      }
+    }
+  } catch {
+    // Ignore compile errors — draft tables simply won't be generated
+  }
   const statements: string[] = [];
   const createViews = options.createViews !== false;
 
@@ -188,8 +229,14 @@ export function buildDeployStatements(
     const def = definition as CSNDefinition;
 
     if (def.kind !== 'entity') continue;
-    if (def.query) continue; // projections/views are not deployed as tables here
+    if (def.query) continue;      // SQL views — skip
+    if (def.projection) continue; // CDS projections (e.g. Service.DraftAdministrativeData) — skip
     if (def['@cds.persistence.skip'] || def['@cds.persistence.exists']) continue;
+    // Skip framework entities from common CDS/SAP namespaces (e.g. sap.common.Languages)
+    if (name.startsWith('sap.') || name.startsWith('cds.')) continue;
+    // Skip .texts sub-entities without an explicit persistence name — they are
+    // already handled by generateTextsTable() when the parent has localized elements.
+    if (name.endsWith('.texts') && !def['@cds.persistence.name']) continue;
 
     const tableName = getPersistenceName(name, def);
     const entityDef = toEntityDefinition(tableName, def);
@@ -234,6 +281,83 @@ export function buildDeployStatements(
     }
   }
 
+  // Second pass: create Snowflake VIEWs for service-layer projection entities.
+  // These are entities in the original CSN that have a `projection` property —
+  // e.g. `E2ETestService.Books as projection on cap_e2e.Books`.
+  // Other CAP adapters (sqlite, hana) also materialize these as DB views.
+  if (createViews) {
+    for (const [name, definition] of Object.entries(originalDefs)) {
+      const def = definition as CSNDefinition;
+      if (def.kind !== 'entity') continue;
+      if (!def.projection) continue;
+      if (name.startsWith('sap.') || name.startsWith('cds.')) continue;
+      if (def['@cds.persistence.skip'] || def['@cds.persistence.exists']) continue;
+
+      const sourceRef: string[] | undefined = (def.projection as any)?.from?.ref;
+      if (!Array.isArray(sourceRef) || sourceRef.length === 0) continue;
+
+      const sourceName = sourceRef.length === 1 ? sourceRef[0] : sourceRef.join('.');
+      if (sourceName === name) continue; // self-reference guard
+
+      const sourceDef = originalDefs[sourceName] as CSNDefinition | undefined;
+      if (sourceDef?.['@cds.persistence.skip'] || sourceDef?.['@cds.persistence.exists']) continue;
+
+      const viewName = getPersistenceName(name, def);
+      const baseTableName = getPersistenceName(sourceName, sourceDef ?? {});
+      const qualifiedBase = qualifyName(baseTableName, credentials);
+      statements.push(generateCreateView(viewName, `SELECT * FROM ${qualifiedBase}`, credentials, true));
+    }
+  }
+
+  return statements;
+}
+
+/**
+ * Generate ALTER TABLE ADD COLUMN statements for new columns found in CSN but missing
+ * from the existing database schema (safe migration — never drops columns).
+ *
+ * @param model       The CDS model
+ * @param existingCols Map of tableName (upper) → Set of existing column names (upper)
+ * @param credentials Snowflake credentials for identifier qualification
+ */
+export function generateMigrationStatements(
+  model: any,
+  existingCols: Map<string, Set<string>>,
+  credentials: SnowflakeCredentials
+): string[] {
+  const definitions: Record<string, any> = { ...(model?.definitions || {}) };
+  try {
+    if (cds.compile?.for?.sql) {
+      const sqlModel = cds.compile.for.sql(model);
+      const sqlDefs = sqlModel?.definitions || {};
+      for (const [name, def] of Object.entries(sqlDefs)) {
+        if (!definitions[name]) definitions[name] = def;
+      }
+    }
+  } catch { /* ignore */ }
+  const statements: string[] = [];
+
+  for (const [name, definition] of Object.entries(definitions)) {
+    const def = definition as CSNDefinition;
+    if (def.kind !== 'entity') continue;
+    if (def.query || def.projection) continue;
+    if (def['@cds.persistence.skip'] || def['@cds.persistence.exists']) continue;
+
+    const tableName = getPersistenceName(name, def);
+    const tableUpper = tableName.toUpperCase();
+    const existing = existingCols.get(tableUpper) ?? new Set<string>();
+    const entityDef = toEntityDefinition(tableName, def);
+
+    for (const [colName, colDef] of Object.entries(entityDef.elements)) {
+      const colUpper = colName.toUpperCase();
+      if (!existing.has(colUpper)) {
+        const qualifiedTable = qualifyName(tableName, credentials);
+        const colDefSQL = generateColumnDefinition(colName, colDef);
+        statements.push(`ALTER TABLE ${qualifiedTable} ADD COLUMN IF NOT EXISTS ${colDefSQL}`);
+      }
+    }
+  }
+
   return statements;
 }
 
@@ -242,8 +366,10 @@ function getPersistenceName(name: string, definition: CSNDefinition): string {
   if (typeof customName === 'string' && customName.length > 0) {
     return customName.replace(/^"|"$/g, '');
   }
-  const parts = name.split('.');
-  return parts[parts.length - 1];
+  // Derive from fully qualified entity name: replace dots with underscores and uppercase.
+  // Matches the convention used by @cap-js/sqlite, @cap-js/hana, and cds.compile.for.sql().
+  // e.g. cap_e2e.Books → CAP_E2E_BOOKS
+  return name.replace(/\./g, '_').toUpperCase();
 }
 
 function toEntityDefinition(name: string, definition: CSNDefinition): EntityDefinition {

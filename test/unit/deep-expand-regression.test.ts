@@ -33,8 +33,8 @@ describe('Deep expand regression', () => {
     };
 
     const { sql } = cqnToSQL(cqn, credentials);
-    expect(sql).to.include('"author_name"');
-    expect(sql).to.include('"author_country_code"');
+    expect(sql).to.include('"author__name"');
+    expect(sql).to.include('"author__country__code"');
   });
 
   it('uses ARRAY_AGG optimization for likely to-many associations', () => {

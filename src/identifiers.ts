@@ -1,5 +1,10 @@
 /**
  * Identifier handling: quoting, casing, schema qualification
+ *
+ * Design: Snowflake stores unquoted identifiers in UPPERCASE. This adapter
+ * normalises all plain identifiers (letters, digits, underscore) to UPPERCASE
+ * so that DDL and DML are consistent and case-insensitive on Snowflake.
+ * Identifiers containing special characters are double-quoted to preserve them.
  */
 
 import { SnowflakeCredentials } from './config.js';
@@ -22,7 +27,10 @@ const RESERVED_WORDS = new Set([
 ]);
 
 /**
- * Determine if an identifier needs quoting
+ * Determine if an identifier needs quoting to preserve its case or special characters.
+ *
+ * Use this for aliases and key references where the exact string matters.
+ * For table/column references use toPhysicalIdentifier instead.
  */
 export function needsQuoting(identifier: string): boolean {
   if (!identifier) return false;
@@ -37,7 +45,8 @@ export function needsQuoting(identifier: string): boolean {
     return true;
   }
 
-  // Check if uppercase version differs (has lowercase or mixed case)
+  // Mixed-case or lowercase identifiers – Snowflake would uppercase them unquoted,
+  // so quote to preserve the original case (important for aliases returned to callers)
   if (identifier !== identifier.toUpperCase()) {
     return true;
   }
@@ -48,6 +57,28 @@ export function needsQuoting(identifier: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Normalise an identifier to its physical Snowflake form:
+ * - Simple identifiers (letters, digits, underscores) → UPPERCASE (unquoted)
+ * - Identifiers with special characters → double-quoted (case preserved)
+ * - Already-quoted identifiers → returned as-is
+ */
+export function toPhysicalIdentifier(identifier: string): string {
+  if (!identifier) return identifier;
+  if (identifier === '*') return identifier;
+
+  // Already quoted
+  if (identifier.startsWith('"') && identifier.endsWith('"')) return identifier;
+
+  // Simple identifiers: uppercase (Snowflake default behaviour)
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    return identifier.toUpperCase();
+  }
+
+  // Otherwise quote to preserve special characters
+  return `"${identifier.replace(/"/g, '""')}"`;
 }
 
 /**
@@ -72,7 +103,9 @@ export function quoteIdentifier(identifier: string): string {
 }
 
 /**
- * Fully qualify a table/view name with database and schema
+ * Fully qualify a table/view name with database and schema.
+ * Each name component is normalised via toPhysicalIdentifier so that plain
+ * identifiers are UPPERCASE (matching Snowflake's unquoted default).
  */
 export function qualifyName(
   name: string,
@@ -81,26 +114,26 @@ export function qualifyName(
 ): string {
   // Parse name (might already be qualified)
   const parts = name.split('.');
-  
+
   if (parts.length === 3) {
     // Already fully qualified: DATABASE.SCHEMA.TABLE
-    return parts.map(p => quoteIdentifier(p)).join('.');
+    return parts.map(p => toPhysicalIdentifier(p)).join('.');
   } else if (parts.length === 2) {
     // Schema.Table - add database
     const [schema, table] = parts;
     if (credentials.database && includeSchema) {
-      return `${quoteIdentifier(credentials.database)}.${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+      return `${toPhysicalIdentifier(credentials.database)}.${toPhysicalIdentifier(schema)}.${toPhysicalIdentifier(table)}`;
     }
-    return `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`;
+    return `${toPhysicalIdentifier(schema)}.${toPhysicalIdentifier(table)}`;
   } else {
     // Just table name - add schema and database if available
     const table = parts[0];
     if (credentials.database && credentials.schema && includeSchema) {
-      return `${quoteIdentifier(credentials.database)}.${quoteIdentifier(credentials.schema)}.${quoteIdentifier(table)}`;
+      return `${toPhysicalIdentifier(credentials.database)}.${toPhysicalIdentifier(credentials.schema)}.${toPhysicalIdentifier(table)}`;
     } else if (credentials.schema && includeSchema) {
-      return `${quoteIdentifier(credentials.schema)}.${quoteIdentifier(table)}`;
+      return `${toPhysicalIdentifier(credentials.schema)}.${toPhysicalIdentifier(table)}`;
     }
-    return quoteIdentifier(table);
+    return toPhysicalIdentifier(table);
   }
 }
 

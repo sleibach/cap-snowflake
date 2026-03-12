@@ -1,13 +1,12 @@
+namespace cap_e2e;
 using { cuid, managed, temporal } from '@sap/cds/common';
 
-@cds.persistence.name: 'CAP_E2E_AUTHORS'
 entity Authors : cuid, managed {
   name    : String(100) @mandatory;
   country : String(2);
   books   : Association to many Books on books.author = $self;
 }
 
-@cds.persistence.name: 'CAP_E2E_BOOKS'
 entity Books : cuid, managed {
   title       : String(120) @mandatory;
   author      : Association to Authors;
@@ -16,7 +15,6 @@ entity Books : cuid, managed {
   description : LargeString;
 }
 
-@cds.persistence.name: 'CAP_E2E_ORDERS'
 entity Orders : cuid, managed {
   book     : Association to Books;
   quantity : Integer @mandatory;
@@ -24,13 +22,11 @@ entity Orders : cuid, managed {
   total    : Decimal(10,2);
 }
 
-@cds.persistence.name: 'CAP_E2E_LOCALIZED_BOOKS'
 entity LocalizedBooks : cuid, managed {
   title       : localized String(120);
   description : localized String;
 }
 
-@cds.persistence.name: 'CAP_E2E_WORK_ASSIGNMENTS'
 entity WorkAssignments : temporal {
   key ID         : UUID;
   employee       : String(100);

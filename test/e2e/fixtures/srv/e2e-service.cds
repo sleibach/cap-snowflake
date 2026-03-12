@@ -1,17 +1,18 @@
 using {
-  Authors as DBAuthors,
-  Books as DBBooks,
-  Orders as DBOrders,
-  LocalizedBooks as DBLocalizedBooks,
-  WorkAssignments as DBWorkAssignments
+  cap_e2e as db
 } from '../db/schema';
 
 service E2ETestService {
-  @readonly entity Authors as projection on DBAuthors;
-  entity Books as projection on DBBooks;
-  entity Orders as projection on DBOrders;
-  entity LocalizedBooks as projection on DBLocalizedBooks;
-  @readonly entity WorkAssignments as projection on DBWorkAssignments;
+  @readonly entity Authors as projection on db.Authors;
+  @odata.draft.enabled
+  entity Books as projection on db.Books;
+
+  action TestAction();
+
+  entity Orders as projection on db.Orders;
+  entity LocalizedBooks as projection on db.LocalizedBooks;
+  @readonly entity WorkAssignments as projection on db.WorkAssignments;
+
 
   action submitOrder(book: UUID, quantity: Integer) returns Orders;
 }

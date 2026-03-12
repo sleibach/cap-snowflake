@@ -41,6 +41,8 @@ export class SnowflakeSQLAPIClient {
   private baseURL: string;
   private maxRetries = 3;
   private retryDelay = 1000;
+  private cachedToken?: string;
+  private tokenExpiry?: number;
 
   constructor(credentials: SnowflakeCredentials) {
     this.credentials = credentials;
@@ -81,9 +83,10 @@ export class SnowflakeSQLAPIClient {
         return result;
       } catch (error) {
         lastError = error;
-        
+
         if (isRetryableError(error) && attempt < this.maxRetries) {
-          const delay = this.retryDelay * Math.pow(2, attempt);
+          const retryAfterHeader = (error as any)?.response?.retryAfter;
+          const delay = this.calculateRetryDelay(attempt, retryAfterHeader);
           logWarning(`Retrying SQL API request (attempt ${attempt + 1}/${this.maxRetries})`, { delay });
           await this.sleep(delay);
           continue;
@@ -153,11 +156,13 @@ export class SnowflakeSQLAPIClient {
       'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT',
     };
 
+    const fetchTimeout = ((body.timeout ?? 60) + 30) * 1000;
     try {
       const response = await fetch(this.baseURL, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(fetchTimeout),
       });
 
       const data = await response.json() as SQLAPIResponse;
@@ -167,6 +172,7 @@ export class SnowflakeSQLAPIClient {
           response: {
             status: response.status,
             data,
+            retryAfter: response.headers.get('retry-after'),
           },
         };
       }
@@ -199,19 +205,31 @@ export class SnowflakeSQLAPIClient {
   }
 
   /**
-   * Get authentication token
+   * Get authentication token — cached until 30 s before expiry.
    */
   private getAuthToken(): string {
+    const now = Date.now();
+    if (this.cachedToken && this.tokenExpiry && now < this.tokenExpiry - 30_000) {
+      return this.cachedToken;
+    }
+
     if (!this.credentials.jwt) {
       throw new Error('JWT configuration is required for SQL API mode');
     }
 
-    return generateJWT(
+    const expiresIn =
+      typeof this.credentials.jwt.expiresIn === 'number'
+        ? this.credentials.jwt.expiresIn
+        : 3600;
+
+    this.cachedToken = generateJWT(
       this.credentials.jwt,
       this.credentials.account,
       this.credentials.user,
       this.credentials.host
     );
+    this.tokenExpiry = now + expiresIn * 1000;
+    return this.cachedToken;
   }
 
   /**
@@ -238,11 +256,23 @@ export class SnowflakeSQLAPIClient {
     }
 
     if (value instanceof Date) {
-      return value.toISOString();
+      // Snowflake SQL API TIMESTAMP_TZ format: "YYYY-MM-DD HH:MI:SS.SSS +00:00"
+      return value.toISOString().replace('T', ' ').replace('Z', ' +00:00');
     }
 
     if (typeof value === 'number' || typeof value === 'boolean') {
       return String(value);
+    }
+
+    if (typeof value === 'string') {
+      // ISO 8601 timestamp strings from CAP (e.g. "2026-03-12T01:23:45.000Z").
+      // Convert to Snowflake TIMESTAMP_TZ format: "YYYY-MM-DD HH:MI:SS.SSS +00:00".
+      // This works for both TIMESTAMP_TZ and TIMESTAMP_NTZ columns (Snowflake strips TZ).
+      const isoRe = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z?$/;
+      const m = isoRe.exec(value);
+      if (m) {
+        return `${m[1]} ${m[2]} +00:00`;
+      }
     }
 
     if (typeof value === 'object') {
@@ -254,10 +284,31 @@ export class SnowflakeSQLAPIClient {
 
   private inferBindingType(value: any): string {
     if (value === null || value === undefined) return 'TEXT';
-    if (value instanceof Date) return 'TIMESTAMP_NTZ';
+    // Timestamps passed as TEXT — Snowflake auto-casts to TIMESTAMP_TZ/NTZ/LTZ.
+    // Using TIMESTAMP_TZ binding type causes SQL compilation errors with formatted
+    // strings; TEXT is always accepted.
+    if (value instanceof Date) return 'TEXT';
     if (typeof value === 'boolean') return 'BOOLEAN';
     if (typeof value === 'number') return Number.isInteger(value) ? 'FIXED' : 'REAL';
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) {
+      return 'TEXT';
+    }
     return 'TEXT';
+  }
+
+  /**
+   * Calculate retry delay with exponential back-off, jitter, and Retry-After header support.
+   */
+  private calculateRetryDelay(attempt: number, retryAfterHeader?: string | null): number {
+    if (retryAfterHeader) {
+      const seconds = Number(retryAfterHeader);
+      if (!isNaN(seconds) && seconds > 0) {
+        return Math.min(seconds * 1000, 30_000);
+      }
+    }
+    const base = this.retryDelay * Math.pow(2, attempt);
+    const jitter = Math.random() * 200;
+    return Math.min(base + jitter, 30_000);
   }
 
   /**
@@ -268,22 +319,70 @@ export class SnowflakeSQLAPIClient {
   }
 
   /**
-   * Parse result rows into objects
+   * Parse result rows into objects, coercing types based on column metadata.
+   * The Snowflake SQL API returns all values as strings.
    */
   static parseRows(result: SQLAPIResult): any[] {
     if (!result.data || result.data.length === 0) {
       return [];
     }
 
-    const columns = result.resultSetMetaData.rowType.map(col => col.name);
-    
+    const rowTypes = result.resultSetMetaData.rowType;
+
     return result.data.map(row => {
       const obj: any = {};
-      columns.forEach((col, idx) => {
-        obj[col] = row[idx];
+      rowTypes.forEach((col, idx) => {
+        obj[col.name] = SnowflakeSQLAPIClient.coerceValue(row[idx], col);
       });
       return obj;
     });
+  }
+
+  /**
+   * Coerce a raw string value from the SQL API to its proper JS type.
+   */
+  private static coerceValue(
+    raw: any,
+    col: { type: string; scale?: number; nullable: boolean }
+  ): any {
+    if (raw === null || raw === undefined) return null;
+
+    const type = (col.type ?? '').toLowerCase();
+
+    switch (type) {
+      case 'boolean':
+        if (typeof raw === 'boolean') return raw;
+        return String(raw).toLowerCase() === 'true' || raw === '1' || raw === 1;
+
+      case 'fixed':
+        // scale === 0 → integer, otherwise decimal
+        if (raw === '') return null;
+        if ((col.scale ?? 0) === 0) return Number.parseInt(String(raw), 10);
+        return Number.parseFloat(String(raw));
+
+      case 'real':
+        if (raw === '') return null;
+        return Number.parseFloat(String(raw));
+
+      case 'variant':
+      case 'object':
+      case 'array':
+        if (typeof raw === 'object') return raw;
+        try { return JSON.parse(String(raw)); } catch { return raw; }
+
+      default: {
+        // For TEXT/VARCHAR columns, CAP sometimes stores JSON-serialised arrays or
+        // objects (e.g. DraftMessages: LargeString).  Auto-parse so CAP receives the
+        // JS type it wrote rather than the raw string representation.
+        if (typeof raw === 'string') {
+          const trimmed = raw.trimStart();
+          if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+            try { return JSON.parse(raw); } catch { /* not JSON – return as-is */ }
+          }
+        }
+        return raw;
+      }
+    }
   }
 }
 

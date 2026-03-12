@@ -9,7 +9,9 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./cds-plugin": "./cds-plugin.js",
+    "./cds-deployer": "./cds-deployer.cjs"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -25,10 +27,12 @@
     "test:e2e:smoke": "SNOWFLAKE_E2E_SMOKE=true NODE_OPTIONS='--import tsx' mocha 'test/e2e/**/*.test.ts'",
     "lint": "eslint src",
     "prepublishOnly": "npm run build",
-    "import-schema": "node dist/cli/import-schema.js"
+    "import-schema": "node dist/cli/import-schema.js",
+    "deploy": "node dist/cli/deploy.js"
   },
   "bin": {
-    "cap-snowflake-import": "./dist/cli/import-schema.js"
+    "cap-snowflake-import": "./dist/cli/import-schema.js",
+    "cap-snowflake-deploy": "./dist/cli/deploy.js"
   },
   "keywords": [
     "sap",
@@ -53,7 +57,9 @@
     "@cap-js/cds-test": "^0.4.1",
     "@cap-js/cds-types": "^0.15.0",
     "@cap-js/db-service": "^2.9.0",
+    "@types/chai": "^5.2.3",
     "@types/jsonwebtoken": "^9.0.5",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",

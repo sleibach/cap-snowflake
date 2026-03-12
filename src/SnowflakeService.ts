@@ -16,7 +16,20 @@ export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
   private sqlApiClient?: SnowflakeSQLAPIClient;
   private sdkClient?: SnowflakeSDKClient;
-  private inTransaction = false;
+  private transactionStates = new Map<string, boolean>();
+
+  private get inTransaction(): boolean {
+    return this.transactionStates.get(cds.context?.id ?? 'default') ?? false;
+  }
+
+  private set inTransaction(value: boolean) {
+    const key = cds.context?.id ?? 'default';
+    if (value) {
+      this.transactionStates.set(key, true);
+    } else {
+      this.transactionStates.delete(key);
+    }
+  }
 
   /**
    * CAP v9 DatabaseService compatibility:
@@ -69,6 +82,10 @@ export class SnowflakeService extends cds.DatabaseService {
     this.on('INSERT', '*', this.onInsert.bind(this));
     this.on('UPDATE', '*', this.onUpdate.bind(this));
     this.on('DELETE', '*', this.onDelete.bind(this));
+    this.on('UPSERT', '*', this.onUpsert.bind(this));
+
+    // Wildcard handler for raw SQL strings (e.g. db.run('SELECT ...'))
+    this.on('*', this.onPlainSQL.bind(this));
 
     // Call parent init
     return super.init();
@@ -108,15 +125,32 @@ export class SnowflakeService extends cds.DatabaseService {
       if (needsCount) {
         const countSQL = wrapWithCount(sql);
         const countResult = await this.execute(countSQL, params);
-        const count = countResult[0]?.count || 0;
-        
+        const count = Number(countResult[0]?.count ?? countResult[0]?.COUNT ?? 0);
+
         // Attach $count to result set
         (rows as any).$count = count;
+
+        // Add @odata.nextLink when more pages exist
+        const top = select.limit?.rows?.val;
+        const skip = select.limit?.offset?.val ?? 0;
+        if (top && skip + rows.length < count) {
+          const nextOffset = skip + top;
+          const nextToken = Buffer.from(String(nextOffset)).toString('base64');
+          (rows as any)['@odata.nextLink'] = `?$skiptoken=${nextToken}`;
+        }
+      } else {
+        // Without $count, emit nextLink heuristically when result fills page exactly
+        const top = select.limit?.rows?.val;
+        if (top && rows.length === top) {
+          const skip = select.limit?.offset?.val ?? 0;
+          const nextToken = Buffer.from(String(skip + top)).toString('base64');
+          (rows as any)['@odata.nextLink'] = `?$skiptoken=${nextToken}`;
+        }
       }
 
       // Return one or many
-      if (select.one && rows.length > 0) {
-        return rows[0];
+      if (select.one) {
+        return rows.length > 0 ? rows[0] : null;
       }
 
       return rows;
@@ -149,7 +183,8 @@ export class SnowflakeService extends cds.DatabaseService {
         // To-many expansions are returned as aggregated JSON arrays under association name.
         const toManyCol = select.columns.find((col: any) => col.expand && col.ref?.[0] === key);
         if (toManyCol) {
-          result[key] = value;
+          // ARRAY_AGG returns null when no rows match; normalize to empty array
+          result[key] = value == null ? [] : value;
           continue;
         }
 
@@ -159,9 +194,13 @@ export class SnowflakeService extends cds.DatabaseService {
         for (const col of select.columns) {
           if (col.expand && col.ref) {
             const assocName = col.ref[0];
-            if (key.startsWith(`${assocName}_`) && key !== `${assocName}_ID`) {
+            // Expand columns use "__" (double underscore) as separator to avoid
+            // aliasing collisions with base FK columns (e.g. author_ID).
+            if (key.startsWith(`${assocName}__`)) {
+              const fieldSuffix = key.substring(assocName.length + 2);
+
               if (!expanded.has(assocName)) expanded.set(assocName, {});
-              const nestedPath = key.substring(assocName.length + 1).split('_');
+              const nestedPath = fieldSuffix.split('__');
               this.assignNested(expanded.get(assocName), nestedPath, value);
               isExpandField = true;
               break;
@@ -221,7 +260,7 @@ export class SnowflakeService extends cds.DatabaseService {
         }
         mapped[key] = value;
       }
-      return this.mapUppercaseFallback(mapped);
+      return mapped;
     });
   }
 
@@ -230,8 +269,9 @@ export class SnowflakeService extends cds.DatabaseService {
     for (const [key, value] of Object.entries(row)) {
       if (/^[A-Z0-9_]+$/.test(key)) {
         out[key.toLowerCase()] = value;
+      } else {
+        out[key] = value;
       }
-      out[key] = value;
     }
     return out;
   }
@@ -264,19 +304,30 @@ export class SnowflakeService extends cds.DatabaseService {
         throw new Error('Invalid INSERT query');
       }
 
-      // Note: CAP runtime handles @readonly checks before reaching adapter
-      // Note: CAP runtime fills in cuid, managed fields automatically
-
-      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
-      
-      await this.execute(sql, params);
-
-      // Return inserted entries
-      if (insert.entries) {
-        return insert.entries;
+      // For draft entities, ensure IsActiveEntity=false is included in the data
+      // BEFORE generating SQL — otherwise Snowflake stores it as NULL and draft
+      // filter queries (IsActiveEntity eq false) return no results.
+      const insertIntoName = typeof insert.into === 'string' ? insert.into 
+        : (insert.into?.ref?.[0]?.id ?? insert.into?.ref?.[0] ?? '');
+      const isDraft = req.target?.name?.endsWith('.drafts') || 
+        (typeof insertIntoName === 'string' && insertIntoName.endsWith('.drafts'));
+      if (isDraft && insert.entries) {
+        for (const entry of insert.entries) {
+          if (entry.IsActiveEntity === undefined) entry.IsActiveEntity = false;
+          if (entry.HasActiveEntity === undefined) entry.HasActiveEntity = false;
+          if (entry.HasDraftEntity === undefined) entry.HasDraftEntity = false;
+        }
       }
 
-      return { affectedRows: 1 };
+      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
+      await this.execute(sql, params);
+
+      // Return inserted entries for CAP
+      if (insert.entries) {
+        return insert.entries.length === 1 ? insert.entries[0] : insert.entries;
+      }
+
+      return req.data;
     } catch (error) {
       logError('INSERT operation failed', error);
       throw normalizeError(error);
@@ -299,10 +350,7 @@ export class SnowflakeService extends cds.DatabaseService {
       // Note: CAP runtime updates managed fields (modifiedAt, modifiedBy) automatically
 
       const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
-      
       const result = await this.execute(sql, params);
-
-      // Return affected rows count
       return result.length || 0;
     } catch (error) {
       logError('UPDATE operation failed', error);
@@ -326,12 +374,12 @@ export class SnowflakeService extends cds.DatabaseService {
       // Note: Compositions trigger cascading deletes automatically via CAP
 
       const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
-      
-      await this.execute(sql, params);
 
-      // Snowflake doesn't return affected rows in same way
-      // Return 0 as we can't easily determine
-      return 0;
+      const result = await this.execute(sql, params);
+
+      // Snowflake DML returns a metadata row; result.length > 0 means the statement ran.
+      // Return 1 so CAP emits 204 No Content instead of 404 Not Found.
+      return result?.length > 0 ? result.length : 1;
     } catch (error) {
       logError('DELETE operation failed', error);
       throw normalizeError(error);
@@ -341,17 +389,23 @@ export class SnowflakeService extends cds.DatabaseService {
   /**
    * Handle UPSERT operations (using MERGE)
    */
-  private async handleUpsert(entity: string, data: any, keys?: string[]): Promise<any> {
+  private async onUpsert(req: any): Promise<any> {
+    const query = req.query;
     try {
-      if (!keys || keys.length === 0) {
-        throw new Error('UPSERT requires key fields');
+      const upsert = query.UPSERT;
+      if (!upsert) throw new Error('Invalid UPSERT query');
+
+      const entity = upsert.into?.ref?.[0] ?? upsert.into;
+      const target = req.target;
+      const keys = target?.keys ? Object.keys(target.keys) : ['ID'];
+      const entries = upsert.entries ?? (upsert.entry ? [upsert.entry] : [req.data]);
+
+      for (const entry of entries) {
+        const { sql, params } = generateMerge(entity, keys, entry, this.credentials);
+        await this.execute(sql, params);
       }
 
-      const { sql, params } = generateMerge(entity, keys, data, this.credentials);
-      
-      await this.execute(sql, params);
-
-      return data;
+      return entries;
     } catch (error) {
       logError('UPSERT operation failed', error);
       throw normalizeError(error);
@@ -359,13 +413,27 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
-   * Run arbitrary SQL
+   * Handle raw SQL strings passed via db.run('SELECT ...') or db.exec('...')
+   * Mirrors the SQLService.onPlainSQL wildcard handler from @cap-js/db-service.
    */
-  private async runSQL(sql: string, params?: any[]): Promise<any[]> {
+  private async onPlainSQL(req: any, next: any): Promise<any> {
+    const { query, data } = req;
+    if (typeof query !== 'string') return next();
+
+    const isSelect = /^\s*(SELECT|WITH|SHOW|DESCRIBE)\b/i.test(query);
     try {
-      return await this.execute(sql, params);
+      if (Array.isArray(data) && Array.isArray(data[0])) {
+        // Batch: array of param arrays
+        const results = await Promise.all(
+          data.map((row: any[]) => this.execute(query, row))
+        );
+        return isSelect ? results.flat() : results;
+      }
+
+      const params = Array.isArray(data) ? data : data != null ? [data] : undefined;
+      return await this.execute(query, params);
     } catch (error) {
-      logError('RUN operation failed', error);
+      logError('Plain SQL execution failed', error);
       throw normalizeError(error);
     }
   }
@@ -374,6 +442,7 @@ export class SnowflakeService extends cds.DatabaseService {
    * Execute SQL statement
    */
   private async execute(sql: string, params?: any[]): Promise<any[]> {
+
     if (this.sqlApiClient) {
       const result = await this.sqlApiClient.execute(sql, params);
       return SnowflakeSQLAPIClient.parseRows(result);

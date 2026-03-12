@@ -8,5 +8,16 @@
         "impl": "../../../dist/index.js"
       }
     }
-  }
+  },
+  "dependencies": {
+    "cap-snowflake": "file:../../.."
+  },
+  "scripts": {
+    "deploy": "node ../../../dist/cli/deploy.js",
+    "deploy:dry": "node ../../../dist/cli/deploy.js --dry",
+    "watch-manage-books": "cds watch --open manage-books/webapp/index.html?sap-ui-xx-viewCache=false"
+  },
+  "sapux": [
+    "app/manage-books"
+  ]
 }

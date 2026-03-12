@@ -1,0 +1,29 @@
+{
+  "generationParameters": {
+    "generationDate": "Wed Mar 11 2026 11:29:24 GMT+0100 (Central European Standard Time)",
+    "generatorPlatform": "Visual Studio Code",
+    "serviceType": "Local Cap",
+    "metadataFilename": "",
+    "serviceUrl": "http://localhost:4004/odata/v4/e2-etest/",
+    "appName": "manage-books",
+    "appTitle": "Manage Books",
+    "appDescription": "",
+    "appNamespace": "",
+    "ui5Theme": "sap_horizon",
+    "ui5Version": "1.145.0",
+    "enableCodeAssist": false,
+    "enableEslint": false,
+    "enableTypeScript": false,
+    "showMockDataInfo": false,
+    "generatorVersion": "1.18.0",
+    "template": "List Report Page V4",
+    "generatorName": "SAP Fiori Application Generator",
+    "entityRelatedConfig": [
+      {
+        "type": "Main Entity",
+        "value": "Books"
+      }
+    ],
+    "launchText": "In order to launch the generated app, simply start your CAP project and navigate to the following location in your browser:\n\nhttp://localhost:4004/manage-books/webapp/index.html"
+  }
+}

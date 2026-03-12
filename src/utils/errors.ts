@@ -6,6 +6,8 @@ export class SnowflakeError extends Error {
   code: string;
   sqlState?: string;
   statusCode?: number;
+  /** CAP-compatible HTTP status (alias for statusCode) */
+  status?: number;
 
   constructor(message: string, code: string, sqlState?: string, statusCode?: number) {
     super(message);
@@ -13,6 +15,7 @@ export class SnowflakeError extends Error {
     this.code = code;
     this.sqlState = sqlState;
     this.statusCode = statusCode;
+    this.status = statusCode; // CAP OData layer reads this for HTTP response status
   }
 }
 

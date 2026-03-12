@@ -3,7 +3,7 @@
  * Handles application-time period tables (time slices)
  */
 
-import { quoteIdentifier, qualifyName } from '../identifiers.js';
+import { qualifyName, toPhysicalIdentifier } from '../identifiers.js';
 import { SnowflakeCredentials } from '../config.js';
 
 export interface TemporalEntity {
@@ -67,8 +67,8 @@ export function addTemporalConditions(
   temporalFields: { validFrom: string; validTo: string },
   temporalQuery?: TemporalQuery
 ): string {
-  const validFrom = quoteIdentifier(temporalFields.validFrom);
-  const validTo = quoteIdentifier(temporalFields.validTo);
+  const validFrom = toPhysicalIdentifier(temporalFields.validFrom);
+  const validTo = toPhysicalIdentifier(temporalFields.validTo);
   
   const conditions: string[] = [];
   
@@ -130,7 +130,7 @@ export function generateTemporalTableDDL(
   // Process elements
   for (const [name, element] of Object.entries(entity.elements)) {
     const elem = element as any;
-    const quotedName = quoteIdentifier(name);
+    const quotedName = toPhysicalIdentifier(name);
     const sqlType = mapCDSType(elem.type, elem.length, elem.precision, elem.scale);
     
     let columnDef = `${quotedName} ${sqlType}`;
@@ -147,7 +147,7 @@ export function generateTemporalTableDDL(
   }
   
   // Composite PK: original keys + validFrom
-  const sql = `CREATE TABLE ${tableName} (
+  const sql = `CREATE TABLE IF NOT EXISTS ${tableName} (
   ${columns.join(',\n  ')},
   PRIMARY KEY (${keys.join(', ')})
 )`;
@@ -192,11 +192,11 @@ export function generateTemporalView(
   if (!temporalFields) {
     throw new Error('Entity is not temporal');
   }
+
+  const validFrom = toPhysicalIdentifier(temporalFields.validFrom);
+  const validTo = toPhysicalIdentifier(temporalFields.validTo);
   
-  const validFrom = quoteIdentifier(temporalFields.validFrom);
-  const validTo = quoteIdentifier(temporalFields.validTo);
-  
-  const sql = `CREATE VIEW ${qualifiedView} AS
+  const sql = `CREATE OR REPLACE VIEW ${qualifiedView} AS
 SELECT * FROM ${tableName}
 WHERE ${validFrom} <= CURRENT_TIMESTAMP()
   AND CURRENT_TIMESTAMP() < ${validTo}`;

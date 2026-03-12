@@ -1,5 +1,7 @@
 /**
  * Unit tests for localization support
+ *
+ * All identifiers are UPPERCASE in Snowflake (unquoted).
  */
 
 import { expect } from 'chai';
@@ -47,6 +49,12 @@ describe('Localization Support', () => {
 
       expect(hasLocalizedElements(entity)).to.be.false;
     });
+
+    it('should return false for null/undefined entity', () => {
+      expect(hasLocalizedElements(null)).to.be.false;
+      expect(hasLocalizedElements(undefined)).to.be.false;
+      expect(hasLocalizedElements({})).to.be.false;
+    });
   });
 
   describe('extractLocalizedElements', () => {
@@ -68,27 +76,62 @@ describe('Localization Support', () => {
       expect(localized[0].length).to.equal(100);
       expect(localized[1].name).to.equal('description');
     });
+
+    it('should return empty array for entity with no localized elements', () => {
+      const entity = {
+        elements: {
+          ID: { type: 'cds.UUID' },
+          price: { type: 'cds.Decimal' },
+        },
+      };
+
+      const localized = extractLocalizedElements(entity);
+      expect(localized).to.deep.equal([]);
+    });
+
+    it('should return empty array for null entity', () => {
+      expect(extractLocalizedElements(null)).to.deep.equal([]);
+    });
   });
 
   describe('getEntityKeys', () => {
-    it('should extract entity keys', () => {
+    it('should extract single key', () => {
       const entity = {
-        name: 'Books',
         elements: {
           ID: { type: 'cds.UUID', key: true },
           title: { type: 'cds.String' },
-          author_ID: { type: 'cds.UUID', key: true },
         },
       };
 
       const keys = getEntityKeys(entity);
+      expect(keys).to.deep.equal(['ID']);
+    });
 
-      expect(keys).to.deep.equal(['ID', 'author_ID']);
+    it('should extract composite keys', () => {
+      const entity = {
+        elements: {
+          country: { type: 'cds.String', key: true },
+          code: { type: 'cds.String', key: true },
+          name: { type: 'cds.String' },
+        },
+      };
+
+      const keys = getEntityKeys(entity);
+      expect(keys).to.include('country');
+      expect(keys).to.include('code');
+      expect(keys).to.have.lengthOf(2);
+    });
+
+    it('should return empty for entity with no keys', () => {
+      const entity = {
+        elements: { title: { type: 'cds.String' } },
+      };
+      expect(getEntityKeys(entity)).to.deep.equal([]);
     });
   });
 
   describe('generateTextsTable', () => {
-    it('should generate .texts table DDL', () => {
+    it('should generate .texts table DDL with UPPERCASE identifiers', () => {
       const entity = {
         entityName: 'Books',
         localizedElements: [
@@ -100,12 +143,12 @@ describe('Localization Support', () => {
 
       const ddl = generateTextsTable(entity, credentials);
 
-      expect(ddl).to.include('CREATE TABLE TEST_DB.TEST_SCHEMA.Books_texts');
-      expect(ddl).to.include('locale VARCHAR(14) NOT NULL');
+      expect(ddl).to.include('CREATE TABLE IF NOT EXISTS TEST_DB.TEST_SCHEMA.BOOKS_TEXTS');
+      expect(ddl).to.include('LOCALE VARCHAR(14) NOT NULL');
       expect(ddl).to.include('ID VARCHAR(36) NOT NULL');
-      expect(ddl).to.include('title VARCHAR(100)');
-      expect(ddl).to.include('description VARCHAR(5000)');
-      expect(ddl).to.include('PRIMARY KEY (locale, ID)');
+      expect(ddl).to.include('TITLE VARCHAR(100)');
+      expect(ddl).to.include('DESCRIPTION VARCHAR(5000)');
+      expect(ddl).to.include('PRIMARY KEY (LOCALE, ID)');
     });
 
     it('should handle composite keys', () => {
@@ -119,7 +162,18 @@ describe('Localization Support', () => {
 
       const ddl = generateTextsTable(entity, credentials);
 
-      expect(ddl).to.include('PRIMARY KEY (locale, country, productCode)');
+      expect(ddl).to.include('PRIMARY KEY (LOCALE, COUNTRY, PRODUCTCODE)');
+    });
+
+    it('should qualify table name with database and schema', () => {
+      const entity = {
+        entityName: 'CAP_BOOKS',
+        localizedElements: [{ name: 'title', type: 'cds.String', localized: true }],
+        keys: ['ID'],
+      };
+
+      const ddl = generateTextsTable(entity, credentials);
+      expect(ddl).to.include('IF NOT EXISTS TEST_DB.TEST_SCHEMA.CAP_BOOKS_TEXTS');
     });
   });
 
@@ -135,11 +189,22 @@ describe('Localization Support', () => {
 
       const view = generateLocalizedView(entity, credentials);
 
-      expect(view).to.include('CREATE VIEW TEST_DB.TEST_SCHEMA.localized_Books');
-      expect(view).to.include('LEFT JOIN TEST_DB.TEST_SCHEMA.Books_texts');
-      expect(view).to.include('COALESCE(texts.title, base.title) AS title');
-      expect(view).to.include("SESSION_PARAMETER('LOCALE')");
-      expect(view).to.include("base.ID = texts.ID");
+      expect(view).to.include('CREATE OR REPLACE VIEW TEST_DB.TEST_SCHEMA.LOCALIZED_BOOKS');
+      expect(view).to.include('LEFT JOIN TEST_DB.TEST_SCHEMA.BOOKS_TEXTS');
+      expect(view).to.include('COALESCE(texts.TITLE, base.TITLE) AS TITLE');
+      expect(view).to.include("texts.LOCALE = 'en'");
+      expect(view).to.include('base.ID = texts.ID');
+    });
+
+    it('should exclude localized columns from base.* to avoid duplicates', () => {
+      const entity = {
+        entityName: 'Books',
+        localizedElements: [{ name: 'title', type: 'cds.String', localized: true }],
+        keys: ['ID'],
+      };
+
+      const view = generateLocalizedView(entity, credentials);
+      expect(view).to.include('base.* EXCLUDE (TITLE)');
     });
 
     it('should use custom default locale', () => {
@@ -152,10 +217,19 @@ describe('Localization Support', () => {
       };
 
       const view = generateLocalizedView(entity, credentials, 'de');
+      expect(view).to.include("texts.LOCALE = 'de'");
+    });
 
-      expect(view).to.include("'de'");
+    it('should handle composite join keys', () => {
+      const entity = {
+        entityName: 'Products',
+        localizedElements: [{ name: 'name', type: 'cds.String', localized: true }],
+        keys: ['country', 'code'],
+      };
+
+      const view = generateLocalizedView(entity, credentials);
+      expect(view).to.include('base.COUNTRY = texts.COUNTRY');
+      expect(view).to.include('base.CODE = texts.CODE');
     });
   });
 });
-
-

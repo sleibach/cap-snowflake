@@ -3,7 +3,7 @@
  * Handles localized entities and .texts table generation
  */
 
-import { quoteIdentifier, qualifyName } from '../identifiers.js';
+import { qualifyName, toPhysicalIdentifier } from '../identifiers.js';
 import { SnowflakeCredentials } from '../config.js';
 import { mapCDSType } from '../ddl/types.js';
 
@@ -33,23 +33,23 @@ export function generateTextsTable(
   const columns: string[] = [];
   
   // Add locale key (from sap.common.TextsAspect)
-  columns.push(`${quoteIdentifier('locale')} VARCHAR(14) NOT NULL`);
-  
+  columns.push(`${toPhysicalIdentifier('locale')} VARCHAR(14) NOT NULL`);
+
   // Add original entity keys
   for (const key of entity.keys) {
-    columns.push(`${quoteIdentifier(key)} VARCHAR(36) NOT NULL`);
+    columns.push(`${toPhysicalIdentifier(key)} VARCHAR(36) NOT NULL`);
   }
-  
+
   // Add localized elements
   for (const element of entity.localizedElements) {
     const sqlType = mapCDSType(element.type, element.length);
-    columns.push(`${quoteIdentifier(element.name)} ${sqlType}`);
+    columns.push(`${toPhysicalIdentifier(element.name)} ${sqlType}`);
   }
-  
+
   // Composite primary key: locale + original keys
-  const pkColumns = ['locale', ...entity.keys].map(c => quoteIdentifier(c));
+  const pkColumns = ['locale', ...entity.keys].map(c => toPhysicalIdentifier(c));
   
-  const sql = `CREATE TABLE ${qualifiedName} (
+  const sql = `CREATE TABLE IF NOT EXISTS ${qualifiedName} (
   ${columns.join(',\n  ')},
   PRIMARY KEY (${pkColumns.join(', ')})
 )`;
@@ -75,26 +75,32 @@ export function generateLocalizedView(
   
   // Build column list
   const columns: string[] = [];
-  
-  // Add all non-localized columns from main table
-  columns.push(`${mainAlias}.*`);
-  
-  // Add localized columns from texts table
+
+  // Add all non-localized columns from main table, excluding localized ones to avoid duplicates
+  // (Snowflake supports EXCLUDE syntax)
+  const excludeCols = entity.localizedElements
+    .map(e => toPhysicalIdentifier(e.name))
+    .join(', ');
+  columns.push(excludeCols.length > 0
+    ? `${mainAlias}.* EXCLUDE (${excludeCols})`
+    : `${mainAlias}.*`);
+
+  // Add localized columns from texts table with fallback to main table
   for (const element of entity.localizedElements) {
-    const quoted = quoteIdentifier(element.name);
-    columns.push(`COALESCE(${textsAlias}.${quoted}, ${mainAlias}.${quoted}) AS ${quoted}`);
+    const phys = toPhysicalIdentifier(element.name);
+    columns.push(`COALESCE(${textsAlias}.${phys}, ${mainAlias}.${phys}) AS ${phys}`);
   }
-  
+
   // Build join condition on keys
   const joinConditions = entity.keys.map(key => {
-    const quoted = quoteIdentifier(key);
-    return `${mainAlias}.${quoted} = ${textsAlias}.${quoted}`;
+    const phys = toPhysicalIdentifier(key);
+    return `${mainAlias}.${phys} = ${textsAlias}.${phys}`;
   });
-  
-  // Add locale condition with fallback to default
-  const localeCondition = `${textsAlias}.locale = COALESCE(SESSION_PARAMETER('LOCALE'), '${defaultLocale}')`;
-  
-  const sql = `CREATE VIEW ${qualifiedView} AS
+
+  // Snowflake views cannot access session variables — use static default locale
+  const localeCondition = `${textsAlias}.LOCALE = '${defaultLocale}'`;
+
+  const sql = `CREATE OR REPLACE VIEW ${qualifiedView} AS
 SELECT ${columns.join(', ')}
 FROM ${mainTable} AS ${mainAlias}
 LEFT JOIN ${textsTable} AS ${textsAlias}

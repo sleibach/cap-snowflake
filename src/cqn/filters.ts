@@ -2,7 +2,7 @@
  * CQN filter/where clause translation to SQL
  */
 
-import { quoteIdentifier } from '../identifiers.js';
+import { toPhysicalIdentifier } from '../identifiers.js';
 import { placeholder } from '../params.js';
 
 export interface CQNExpression {
@@ -17,18 +17,18 @@ export interface CQNExpression {
 /**
  * Translate CQN where/having expression to SQL
  */
-export function translateFilter(xpr: any[], params: any[]): string {
+export function translateFilter(xpr: any[], params: any[], baseAlias?: string, isDraft?: boolean): string {
   if (!xpr || xpr.length === 0) {
     return '';
   }
 
-  return translateExpression(xpr, params);
+  return translateExpression(xpr, params, baseAlias, isDraft);
 }
 
 /**
  * Translate a CQN expression
  */
-function translateExpression(xpr: any[], params: any[]): string {
+function translateExpression(xpr: any[], params: any[], baseAlias?: string, isDraft?: boolean): string {
   const parts: string[] = [];
 
   for (let i = 0; i < xpr.length; i++) {
@@ -38,16 +38,35 @@ function translateExpression(xpr: any[], params: any[]): string {
     if (typeof element === 'string') {
       parts.push(translateOperator(element));
     }
-    // Object: ref, val, func, xpr, list
+    // Object: ref, val, func, xpr, list, lambda
     else if (typeof element === 'object' && element !== null) {
-      if (element.ref) {
-        parts.push(translateRef(element.ref));
+      // Skip comparisons involving navigation paths (e.g. DraftAdministrativeData/InProcessByUser)
+      // that require JOINs we cannot resolve. For value comparisons, replace with TRUE.
+      // For IS NULL patterns (nextVal is a string keyword), let translateRef return NULL so that
+      // "NULL IS NULL" evaluates correctly in SQL.
+      if (element.ref && element.ref.length > 1 && DRAFT_NAV_ENTITIES.has(element.ref[0].toLowerCase())) {
+        const nextOp = xpr[i + 1];
+        const nextVal = xpr[i + 2];
+        if (typeof nextOp === 'string' && nextVal !== null && nextVal !== undefined && typeof nextVal === 'object' && 'val' in nextVal) {
+          // e.g. SiblingEntity/X = value — skip operator+value, push TRUE
+          i += 2;
+          parts.push('TRUE');
+          continue;
+        }
+        // For IS NULL / IS NOT NULL patterns or bare refs, translateRef returns 'NULL'
+        parts.push(translateRef(element.ref, baseAlias, isDraft));
+        continue;
+      }
+      if (element.ref && element.lambda) {
+        parts.push(translateLambda(element, params));
+      } else if (element.ref) {
+        parts.push(translateRef(element.ref, baseAlias, isDraft));
       } else if ('val' in element) {
         parts.push(translateVal(element.val, params));
       } else if (element.func) {
         parts.push(translateFunc(element, params));
       } else if (element.xpr) {
-        parts.push(`(${translateExpression(element.xpr, params)})`);
+        parts.push(`(${translateExpression(element.xpr, params, baseAlias, isDraft)})`);
       } else if (element.list) {
         parts.push(translateList(element.list, params));
       }
@@ -89,10 +108,37 @@ function translateOperator(op: string): string {
 /**
  * Translate reference (column name)
  */
-function translateRef(ref: string[]): string {
+/**
+ * CAP draft indicator columns / navigation paths that do not exist on the
+ * physical table.  In WHERE clauses we return their logical constant value so
+ * that the overall predicate remains correct:
+ *   IsActiveEntity         → TRUE   (all rows in the base table are active)
+ *   HasActiveEntity        → FALSE
+ *   HasDraftEntity         → FALSE
+ *   SiblingEntity/...      → NULL   (no sibling entity exists)
+ *   DraftAdministrativeData/... → NULL
+ */
+const DRAFT_REF_CONSTANTS: Record<string, string> = {
+  isactiveentity: 'TRUE',
+  hasactiveentity: 'FALSE',
+  hasdraftentity: 'FALSE',
+};
+const DRAFT_NAV_ENTITIES = new Set(['siblingentity', 'draftadministrativedata']);
+
+function translateRef(ref: string[], baseAlias?: string, isDraft?: boolean): string {
   if (ref.length === 1) {
-    return toPhysicalIdentifier(ref[0]);
+    // On draft tables, draft columns are physical — use them directly
+    if (!isDraft) {
+      const constant = DRAFT_REF_CONSTANTS[ref[0].toLowerCase()];
+      if (constant !== undefined) return constant;
+    }
+    const col = toPhysicalIdentifier(ref[0]);
+    return baseAlias ? `${baseAlias}.${col}` : col;
   }
+
+  // Navigation path starting with an association entity (SiblingEntity, DraftAdministrativeData)
+  // These require JOINs — without them, return NULL regardless of isDraft
+  if (DRAFT_NAV_ENTITIES.has(ref[0].toLowerCase())) return 'NULL';
 
   // Multiple parts: table.column or alias.column
   return ref.map(part => toPhysicalIdentifier(part)).join('.');
@@ -189,6 +235,24 @@ function translateFunc(func: CQNExpression, params: any[]): string {
 }
 
 /**
+ * Translate OData lambda operator (any / all) to EXISTS / NOT EXISTS SQL
+ */
+function translateLambda(element: any, params: any[]): string {
+  const lambda: string = element.lambda; // 'any' or 'all'
+  const assocName: string = element.ref[element.ref.length - 1];
+  const variable: string = element.variable || 'lv';
+  const conditionSQL = element.where ? translateFilter(element.where, params) : '1=1';
+  const childTable = toPhysicalIdentifier(assocName);
+  const fkCol = toPhysicalIdentifier(`${assocName}_ID`);
+
+  if (lambda === 'any') {
+    return `EXISTS (SELECT 1 FROM ${childTable} AS ${variable} WHERE ${variable}.${fkCol} = ${toPhysicalIdentifier('ID')} AND (${conditionSQL}))`;
+  }
+  // 'all'
+  return `NOT EXISTS (SELECT 1 FROM ${childTable} AS ${variable} WHERE ${variable}.${fkCol} = ${toPhysicalIdentifier('ID')} AND NOT (${conditionSQL}))`;
+}
+
+/**
  * Translate list (for IN operator)
  */
 function translateList(list: any[], params: any[]): string {
@@ -203,13 +267,66 @@ function translateList(list: any[], params: any[]): string {
   return `(${values.join(', ')})`;
 }
 
-function toPhysicalIdentifier(identifier: string): string {
-  if (!identifier) return identifier;
-  if (identifier === '*') return identifier;
-  if (identifier.startsWith('"') && identifier.endsWith('"')) return identifier;
-  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
-    return identifier.toUpperCase();
+/**
+ * Translate CAP $search expression to ILIKE SQL conditions over searchable string columns.
+ *
+ * searchExpr format: [{ val: 'term' }, 'and', { val: 'other' }]
+ * Returns an SQL fragment like:
+ *   (COL1 ILIKE ? OR COL2 ILIKE ?) AND (COL1 ILIKE ? OR COL2 ILIKE ?)
+ */
+export function translateSearch(
+  searchExpr: any[],
+  targetElements: Record<string, any>,
+  params: any[],
+  baseAlias?: string
+): string {
+  // Collect searchable string columns, qualified with baseAlias when JOINs are present
+  // to avoid "ambiguous column name" errors (e.g. CREATEDBY in both joined tables).
+  const searchableCols = Object.entries(targetElements)
+    .filter(([, el]) => {
+      if (!el || typeof el !== 'object') return false;
+      if (el['@cds.search'] === false) return false;
+      const t = (el.type ?? '').toLowerCase();
+      return t.includes('string') || t.includes('largestring') || t === 'cds.string' || t === 'cds.largestring';
+    })
+    .map(([name]) => {
+      const physical = toPhysicalIdentifier(name);
+      return baseAlias ? `${baseAlias}.${physical}` : physical;
+    });
+
+  if (searchableCols.length === 0) {
+    return '';
   }
-  return quoteIdentifier(identifier);
+
+  // Parse search expression: terms separated by 'and'/'or'
+  // Each term is { val: 'string' }; operators are plain strings
+  const termBlocks: string[] = [];
+  const operators: string[] = [];
+
+  for (const item of searchExpr) {
+    if (typeof item === 'string') {
+      operators.push(item.toUpperCase());
+    } else if (item && 'val' in item) {
+      // Each column gets its own bound parameter
+      const orBlock = searchableCols.map(col => {
+        params.push(`%${item.val}%`);
+        return `${col} ILIKE ${placeholder()}`;
+      }).join(' OR ');
+      termBlocks.push(`(${orBlock})`);
+    }
+  }
+
+  if (termBlocks.length === 0) return '';
+  if (termBlocks.length === 1) return termBlocks[0];
+
+  // Interleave term blocks with operators (default AND when missing)
+  const parts: string[] = [termBlocks[0]];
+  for (let i = 1; i < termBlocks.length; i++) {
+    parts.push(operators[i - 1] ?? 'AND');
+    parts.push(termBlocks[i]);
+  }
+  return parts.join(' ');
 }
+
+// toPhysicalIdentifier is imported from identifiers.ts
 
