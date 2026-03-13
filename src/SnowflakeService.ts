@@ -171,13 +171,11 @@ export class SnowflakeService extends cds.DatabaseService {
       }
 
       // Translate to SQL (now with JOIN-based expand support)
-      let { sql, params } = cqnToSQL(transformedQuery, this.credentials, { target: req.target });
+      const { sql: initialSql, params } = cqnToSQL(transformedQuery, this.credentials, { target: req.target });
 
       // Snowflake Time Travel: inject AT clause when sap-snowflake-at header is present
       const timeTravelAt = parseTimeTravelHeader(req.headers ?? {});
-      if (timeTravelAt) {
-        sql = injectTimeTravelClause(sql, timeTravelAt);
-      }
+      const sql = timeTravelAt ? injectTimeTravelClause(initialSql, timeTravelAt) : initialSql;
 
       if (this.shouldStreamRead(req, select)) {
         return this.executeStream(sql, params, req?.data?.batchSize);
