@@ -1,22 +1,32 @@
 # cap-snowflake
 
-SAP CAP database adapter for Snowflake with full OData support.
+SAP CAP database adapter for Snowflake — production-grade OData V4 support for the SAP Cloud Application Programming Model.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
 
-## Features
+---
 
-**Full CAP Integration** - Implements `cds.DatabaseService` contract  
-**OData Support** - `$select`, `$filter`, `$orderby`, `$top`, `$skip`, `$count`, basic `$expand`  
-**Dual Connectivity** - SQL API (JWT) or Snowflake Node.js SDK  
-**CQN Translation** - Complete SELECT/INSERT/UPDATE/DELETE/UPSERT (MERGE) support  
-**Localization** - Support for localized entities with .texts tables and views  
-**Temporal Data** - Application-time period tables (time slices) with @cds.valid.from/to  
-**Schema Introspection** - Import existing Snowflake tables as CDS entities  
-**Type Safety** - Full TypeScript definitions  
-**Production Ready** - Error handling, retries, logging, connection management  
-**Security First** - JWT key-pair authentication, parameter binding, SQL injection prevention  
+## Overview
+
+`cap-snowflake` implements the `cds.DatabaseService` interface from `@cap-js/db-service`, allowing Snowflake to serve as the persistence layer for SAP CAP applications. It translates CAP Query Notation (CQN) to Snowflake SQL and provides full OData V4 compatibility for CAP services.
+
+### Connectivity Modes
+
+| Mode | Protocol | Authentication | Recommended For |
+|------|----------|---------------|-----------------|
+| **SQL API** (default) | HTTPS REST | JWT key-pair | SAP BTP, Cloud Foundry, serverless |
+| **SDK** | Native Snowflake driver | Username/password | On-premise, local development |
+
+---
+
+## Prerequisites
+
+- Node.js 18 or later
+- SAP CAP (`@sap/cds`) 7.0 or later
+- A Snowflake account with a dedicated user, role, warehouse, database, and schema
+
+---
 
 ## Installation
 
@@ -24,11 +34,13 @@ SAP CAP database adapter for Snowflake with full OData support.
 npm install cap-snowflake
 ```
 
+---
+
 ## Quick Start
 
-### 1. Configure your CAP application
+### 1. Register the adapter
 
-Add to your `package.json`:
+Add to your application's `package.json`:
 
 ```json
 {
@@ -36,20 +48,33 @@ Add to your `package.json`:
     "requires": {
       "db": {
         "kind": "snowflake",
-        "impl": "cap-snowflake",
-        "credentials": {
-          "account": "YOUR_ACCOUNT",
-          "host": "YOUR_ACCOUNT.snowflakecomputing.com",
-          "user": "YOUR_USER",
-          "role": "YOUR_ROLE",
-          "warehouse": "YOUR_WAREHOUSE",
-          "database": "YOUR_DATABASE",
-          "schema": "YOUR_SCHEMA",
-          "auth": "jwt",
-          "jwt": {
-            "privateKey": "env:SNOWFLAKE_PRIVATE_KEY",
-            "privateKeyPassphrase": "env:SNOWFLAKE_PASSPHRASE"
-          }
+        "impl": "cap-snowflake"
+      }
+    }
+  }
+}
+```
+
+### 2. Provide credentials
+
+Create `~/.cdsrc.json` for local development (or bind via a user-provided service on Cloud Foundry):
+
+```json
+{
+  "requires": {
+    "db": {
+      "credentials": {
+        "account": "myorg-myaccount",
+        "host": "myorg-myaccount.snowflakecomputing.com",
+        "user": "CAP_USER",
+        "role": "CAP_ROLE",
+        "warehouse": "CAP_WH",
+        "database": "CAP_DB",
+        "schema": "APP",
+        "auth": "jwt",
+        "jwt": {
+          "privateKey": "env:SNOWFLAKE_PRIVATE_KEY",
+          "privateKeyPassphrase": "env:SNOWFLAKE_PASSPHRASE"
         }
       }
     }
@@ -57,41 +82,43 @@ Add to your `package.json`:
 }
 ```
 
-> [!IMPORTANT]
-> For Cloud Foundry deployments, Snowflake credentials should be provided at runtime via a user-provided service bound to the app, rather than hardcoding them in project files or typical user provided environment varibales.
+> **Cloud Foundry / BTP**: Supply credentials at runtime via a user-provided service instance bound to the application. Do not hard-code credentials in project files or environment variables stored in the repository.
 
-### 2. Set up environment variables
-
-```bash
-export SNOWFLAKE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...
------END PRIVATE KEY-----"
-
-export SNOWFLAKE_PASSPHRASE="your-key-passphrase"
-```
-
-### 3. Run your CAP service
+### 3. Deploy and serve
 
 ```bash
-cds serve
+cds deploy --to snowflake    # creates tables in Snowflake
+cds serve                    # starts the CAP OData service
 ```
 
-The adapter automatically translates CAP queries to Snowflake SQL!
+---
 
-## Authentication Modes
+## Authentication
 
-### JWT Authentication (Recommended for BTP)
+### JWT Key-Pair (Recommended)
 
-Uses RSA key-pair authentication with JWT tokens. Best for cloud deployments.
+RSA key-pair authentication is the recommended approach for all cloud deployments. Tokens are short-lived and automatically refreshed.
+
+**Generate a key pair:**
+
+```bash
+# Generate RSA private key (PKCS#8, unencrypted)
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out snowflake_key.p8 -nocrypt
+
+# Extract public key
+openssl rsa -in snowflake_key.p8 -pubout -out snowflake_key.pub
+
+# Register the public key with your Snowflake user
+ALTER USER CAP_USER SET RSA_PUBLIC_KEY='<content of snowflake_key.pub without headers>';
+```
+
+**Configuration:**
 
 ```json
 {
   "credentials": {
     "auth": "jwt",
     "jwt": {
-      "aud": "https://YOUR_ACCOUNT.snowflakecomputing.com",
-      "issuer": "YOUR_ACCOUNT.YOUR_USER",
-      "subject": "YOUR_USER",
       "privateKey": "env:SNOWFLAKE_PRIVATE_KEY",
       "privateKeyPassphrase": "env:SNOWFLAKE_PASSPHRASE",
       "algorithm": "RS256",
@@ -101,22 +128,11 @@ Uses RSA key-pair authentication with JWT tokens. Best for cloud deployments.
 }
 ```
 
-#### Generating Key Pair
+The `env:` prefix instructs the adapter to read the value from the named environment variable at runtime.
 
-```bash
-# Generate private key
-openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out snowflake_key.p8 -nocrypt
+### SDK / Password
 
-# Extract public key
-openssl rsa -in snowflake_key.p8 -pubout -out snowflake_key.pub
-
-# Configure in Snowflake
-ALTER USER YOUR_USER SET RSA_PUBLIC_KEY='<public_key_content>';
-```
-
-### SDK Authentication
-
-Uses username/password. Simpler but less suitable for production.
+For local development or environments where key-pair authentication is not available:
 
 ```json
 {
@@ -127,432 +143,330 @@ Uses username/password. Simpler but less suitable for production.
 }
 ```
 
+---
+
 ## Configuration Reference
 
-| Option | Required | Default | Description |
-|--------|----------|---------|-------------|
-| `account` | ✅ | - | Snowflake account identifier |
-| `host` | | `{account}.snowflakecomputing.com` | Snowflake host URL |
-| `user` | ✅ | - | Snowflake username |
-| `role` | | - | Snowflake role to assume |
-| `warehouse` | | - | Snowflake warehouse to use |
-| `database` | | - | Default database |
-| `schema` | | - | Default schema |
-| `auth` | ✅ | - | Authentication mode: `jwt` or `sdk` |
-| `timeout` | | 60 | Query timeout in seconds |
+| Property | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `account` | ✅ | — | Snowflake account identifier (e.g., `myorg-myaccount`) |
+| `host` | | `{account}.snowflakecomputing.com` | Snowflake endpoint |
+| `user` | ✅ | — | Snowflake username |
+| `role` | | — | Role to assume for all statements |
+| `warehouse` | | — | Virtual warehouse for compute |
+| `database` | | — | Default database |
+| `schema` | | — | Default schema |
+| `auth` | ✅ | — | `jwt` or `sdk` |
+| `jwt.privateKey` | (jwt) | — | PEM private key or `env:VAR_NAME` reference |
+| `jwt.privateKeyPassphrase` | | — | Passphrase for encrypted key |
+| `jwt.expiresIn` | | `3600` | Token lifetime in seconds |
+| `password` | (sdk) | — | Password or `env:VAR_NAME` reference |
+| `timeout` | | `60` | Query timeout in seconds |
+| `serviceName` | | — | Optional: override service name in requests |
 
-## Type Mappings
+---
 
-| CDS Type | Snowflake Type | Notes |
-|----------|----------------|-------|
-| `cds.String` | `VARCHAR(n)` | Default length: 5000 |
-| `cds.LargeString` | `TEXT` | |
-| `cds.Boolean` | `BOOLEAN` | |
-| `cds.Integer` | `NUMBER(38,0)` | |
-| `cds.Integer64` | `NUMBER(38,0)` | |
-| `cds.Decimal(p,s)` | `NUMBER(p,s)` | |
-| `cds.Double` | `FLOAT` | |
-| `cds.Date` | `DATE` | |
-| `cds.Time` | `TIME` | |
-| `cds.DateTime` | `TIMESTAMP_NTZ` | No timezone |
-| `cds.Timestamp` | `TIMESTAMP_TZ` | With timezone |
-| `cds.UUID` | `VARCHAR(36)` | |
-| `cds.Binary` | `BINARY` | |
-| `cds.Array` | `ARRAY` | |
-| `cds.Json` | `VARIANT` | |
+## Schema Deployment
 
-## Identifier Handling
-
-Snowflake's identifier rules:
-
-- **Unquoted identifiers** → Stored as UPPERCASE
-- **Quoted identifiers** → Preserve exact case
-- **Reserved words** → Automatically quoted
-- **Mixed case** → Automatically quoted
-
-The adapter handles quoting automatically based on your CDS model.
-
-```cds
-// Uppercase (no quotes needed)
-entity BOOKS { ... }
-
-// Mixed case (auto-quoted as "Books")
-entity Books { ... }
-
-// Explicit quotes (preserved)
-@cds.persistence.name: '"MyBooks"'
-entity MyBooks { ... }
-```
-
-## Supported OData Features
-
-### Fully Supported
-
-- **$select** - Column projection
-- **$filter** - Where clauses with operators: `=`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `between`, `like`
-- **$filter functions** - `contains`, `startswith`, `endswith`, `substring`, `tolower`, `toupper`
-- **$orderby** - Sorting with `asc`/`desc`, `nulls first`/`nulls last`
-- **$top** - Limit results (LIMIT)
-- **$skip** - Offset results (OFFSET)
-- **$count** - Include total count
-
-### Optimized $expand Support
-
-- **To-one associations** - Single-query LEFT JOIN approach
-  - Generates efficient LEFT JOIN for managed associations
-  - Automatic result restructuring into nested objects
-  - Supports inline expansion for flattened results
-
-- **To-many associations** - ARRAY_AGG with OBJECT_CONSTRUCT
-  - Uses Snowflake JSON functions for aggregation
-  - Single query with GROUP BY for efficient execution
-  - Returns properly structured nested arrays
-
-- **Path expressions** - Navigation in SELECT and WHERE clauses
-  - Support for `author.name` in column selection
-  - Support for `author.country.code` in filter conditions
-  - Automatic JOIN generation for path navigation
-
-### Not Yet Supported
-
-- Complex multi-table JOINs in single query
-- Aggregation via `$apply`
-- Full text search
-
-## CQN Operations
-
-### SELECT
-
-```javascript
-const books = await SELECT.from('Books')
-  .where({ price: { '<': 50 } })
-  .orderBy('title')
-  .limit(10, 20);
-```
-
-Translates to:
-```sql
-SELECT * FROM BOOKS 
-WHERE price < ? 
-ORDER BY title 
-LIMIT 10 OFFSET 20
-```
-
-### INSERT
-
-```javascript
-await INSERT.into('Books').entries([
-  { ID: '1', title: 'Book 1', price: 19.99 },
-  { ID: '2', title: 'Book 2', price: 29.99 }
-]);
-```
-
-Translates to:
-```sql
-INSERT INTO BOOKS (ID, title, price) 
-VALUES (?, ?, ?), (?, ?, ?)
-```
-
-### UPDATE
-
-```javascript
-await UPDATE('Books')
-  .set({ price: 24.99 })
-  .where({ ID: '1' });
-```
-
-Translates to:
-```sql
-UPDATE BOOKS 
-SET price = ? 
-WHERE ID = ?
-```
-
-### DELETE
-
-```javascript
-await DELETE.from('Books').where({ ID: '1' });
-```
-
-Translates to:
-```sql
-DELETE FROM BOOKS WHERE ID = ?
-```
-
-### UPSERT (MERGE)
-
-```javascript
-await UPSERT.into('Books').entries({
-  ID: '1',
-  title: 'Updated Book',
-  price: 24.99
-});
-```
-
-Translates to:
-```sql
-MERGE INTO BOOKS AS target
-USING (SELECT ? AS ID, ? AS title, ? AS price) AS source
-ON target.ID = source.ID
-WHEN MATCHED THEN UPDATE SET title = source.title, price = source.price
-WHEN NOT MATCHED THEN INSERT (ID, title, price) VALUES (source.ID, source.title, source.price)
-```
-
-## Transactions
-
-Transactions are supported when using SDK mode:
-
-```javascript
-const tx = cds.transaction();
-try {
-  await tx.run(INSERT.into('Books').entries({ ... }));
-  await tx.run(UPDATE('Inventory').set({ ... }));
-  await tx.commit();
-} catch (error) {
-  await tx.rollback();
-  throw error;
-}
-```
-
-**Note**: SQL API mode has limited transaction support due to API constraints.
-
-## Error Handling
-
-Errors are normalized to CAP error format with appropriate HTTP status codes:
-
-```javascript
-try {
-  await SELECT.from('Books').where({ ID: 'invalid' });
-} catch (error) {
-  console.error(error.code);       // Snowflake error code
-  console.error(error.sqlState);   // SQL state
-  console.error(error.statusCode); // HTTP status (404, 400, 500, etc.)
-}
-```
-
-## Performance Considerations
-
-- **Projection pushdown** - Only requested columns are selected
-- **Predicate pushdown** - Filters are executed in Snowflake
-- **Pagination** - Uses native LIMIT/OFFSET
-- **Connection pooling** - SDK mode uses connection pooling
-- **Retries** - Automatic retry with exponential backoff for transient errors
-- **Query timeout** - Configurable per-statement timeout
-
-## Limitations (v1.0)
-
-1. **DDL Generation** - `cds deploy` supports baseline table/view creation; advanced migration diffs are still manual
-2. **Foreign Keys** - Snowflake doesn't enforce FKs; only for metadata
-3. **Complex $expand** - Deep nested and unmanaged edge cases may still require follow-up query strategies
-4. **SQL API Transactions** - Limited compared to SDK mode
-5. **Auto-increment** - Requires SEQUENCE objects (manual setup)
-
-## Development
+The adapter provides model-driven schema deployment via `cds deploy`:
 
 ```bash
-# Install dependencies
-npm install
-
-# Build
-npm run build
-
-# Run unit tests
-npm run test:unit
-
-# Run integration tests (requires Snowflake account)
-export SNOWFLAKE_TEST=true
-export SNOWFLAKE_ACCOUNT=...
-export SNOWFLAKE_USER=...
-export SNOWFLAKE_PRIVATE_KEY=...
-npm run test:integ
-
-# Run HTTP E2E tests against Snowflake
-export SNOWFLAKE_TEST=true
-npm run test:e2e
-
-# Run E2E suite in smoke mode
-export SNOWFLAKE_E2E_SMOKE=true
-npm run test:e2e:smoke
-
-# Lint
-npm run lint
+cds deploy --to snowflake
 ```
 
-### E2E test environment variables
+**What gets created:**
 
-The E2E suite in `test/e2e/cap-http.test.ts` expects:
+| Artifact | Description |
+|----------|-------------|
+| Base tables | One table per persistent CDS entity |
+| Localized `.texts` tables | For entities with `localized` elements |
+| Localized views | `localized_<Entity>` views with COALESCE locale fallback |
+| Draft tables | `<Entity>.drafts` tables for `@odata.draft.enabled` entities |
+| Temporal views | `<Entity>_current` views for temporal entities |
 
-- `SNOWFLAKE_ACCOUNT`
-- `SNOWFLAKE_USER`
-- `SNOWFLAKE_DATABASE`
-- `SNOWFLAKE_SCHEMA`
-- Optional: `SNOWFLAKE_HOST`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`
-- Auth:
-  - JWT mode: `SNOWFLAKE_PRIVATE_KEY` (+ optional `SNOWFLAKE_PASSPHRASE`)
-  - SDK mode: `SNOWFLAKE_AUTH=sdk` and `SNOWFLAKE_PASSWORD`
+**Schema evolution:**
 
-### Deploy support (`cds deploy`)
+Re-running `cds deploy` on an existing database is idempotent — tables already present are preserved. New columns are added with `ALTER TABLE ... ADD COLUMN`. The adapter follows an add-only policy; column removal requires explicit migration SQL.
 
-The adapter now performs model-driven deploy execution for persisted entities:
+---
 
-- creates base tables (idempotent where possible)
-- creates localized `.texts` tables and localized views
-- creates temporal tables and current-slice views
+## OData V4 Feature Coverage
 
-For complex schema evolution on existing objects, use explicit migration SQL.
+### Query Capabilities
 
-## Examples
+| Feature | OData Syntax | Status |
+|---------|-------------|--------|
+| Column projection | `$select=field1,field2` | ✅ |
+| Equality / comparison filters | `$filter=price gt 10` | ✅ |
+| String functions | `$filter=contains(title,'cap')` | ✅ |
+| Case functions | `$filter=tolower(title) eq 'cap'` | ✅ |
+| Math functions | `$filter=round(price) eq 20` | ✅ |
+| Date/time functions | `$filter=year(createdAt) eq 2024` | ✅ |
+| Null comparisons | `$filter=field eq null` | ✅ |
+| Boolean logic | `$filter=... and/or/not ...` | ✅ |
+| Navigation property filter | `$filter=author/name eq 'Doe'` | ✅ |
+| Lambda operators | `$filter=books/any(b:b/price gt 30)` | ✅ |
+| Free-text search | `$search=keyword` | ✅ |
+| Sorting | `$orderby=title asc,price desc` | ✅ |
+| Pagination | `$top=10&$skip=20` | ✅ |
+| Total row count | `$count=true` | ✅ |
+| Inline count | `$inlinecount=allpages` | ✅ |
+| Aggregation | `$apply=groupby((field),aggregate(...))` | ✅ |
+| Aggregation filter | `$apply=filter(price gt 10)/aggregate(...)` | ✅ |
 
-See the [examples/cap-svc](./examples/cap-svc) directory for a complete working CAP application.
+### $expand Support
 
-## Troubleshooting
+| Feature | Status |
+|---------|--------|
+| To-one association (LEFT JOIN) | ✅ |
+| To-many association (ARRAY_AGG) | ✅ |
+| Nested `$expand` (multi-level) | ✅ |
+| `$expand` with `$select` | ✅ |
+| `$expand` with `$filter` | ✅ |
+| `$expand` with `$orderby` | ✅ |
+| `$expand` with `$top`/`$skip` | ✅ |
+| Navigation property read | ✅ |
 
-### "Failed to generate JWT"
-- Check that your private key is in PEM format (PKCS#8)
-- Verify the key is not encrypted or provide the passphrase
-- Ensure no extra whitespace in the key
+### Data Modification
 
-### "Authentication failed"
-- Verify the public key is configured in Snowflake: `DESCRIBE USER YOUR_USER`
-- Check that account and user names match exactly (case-sensitive)
-- Ensure the JWT issuer/subject match the configured user
+| Feature | Status |
+|---------|--------|
+| Single entity INSERT | ✅ |
+| UUID auto-generation (`@cds.on.insert: $uuid`) | ✅ |
+| Deep insert (compositions) | ✅ |
+| Managed fields on insert (`createdAt`, `createdBy`) | ✅ |
+| Single field PATCH | ✅ |
+| Deep UPDATE (nested compositions) | ✅ |
+| Null field update via PATCH | ✅ |
+| Managed fields on update (`modifiedAt`, `modifiedBy`) | ✅ |
+| DELETE single entity | ✅ |
+| CASCADE DELETE (compositions) | ✅ |
+| UPSERT (MERGE) | ✅ |
 
-### "Object does not exist"
-- Check database/schema configuration
-- Verify table names match case (use quotes for mixed case)
-- Ensure proper permissions: `GRANT SELECT ON TABLE ... TO ROLE ...`
+### OData Draft (Fiori Elements)
 
-### "Insufficient privileges"
-- Grant necessary permissions to your Snowflake role
-- Check warehouse access: `GRANT USAGE ON WAREHOUSE ... TO ROLE ...`
+| Flow | Status |
+|------|--------|
+| Create draft (`POST` with empty body) | ✅ |
+| Edit existing active entity (`draftEdit`) | ✅ |
+| Patch draft fields (`PATCH IsActiveEntity=false`) | ✅ |
+| Read draft with `$expand=DraftAdministrativeData` | ✅ |
+| Activate draft (`draftActivate`) | ✅ |
+| Discard draft (`DELETE IsActiveEntity=false`) | ✅ |
+| Draft list filter (`IsActiveEntity eq true or SiblingEntity/...`) | ✅ |
+| Deep draft with composed entities | ✅ |
 
-## Schema Introspection
+---
 
-Import existing Snowflake tables as CDS entities:
+## Advanced Features
 
-```bash
-# Import schema from Snowflake
-npx cap-snowflake-import --schema=MY_SCHEMA --output=db/schema.cds
-```
+### Localization
 
-This feature automatically:
-- Introspects tables and views from Snowflake
-- Generates CDS entity definitions
-- Converts data types (Snowflake → CDS)
-- Creates associations from foreign keys
-- Handles naming conventions (SNAKE_CASE → camelCase)
-
-See [Schema Import Guide](./docs/SCHEMA_IMPORT.md) for details.
-
-## Localization Support
-
-The adapter supports localized entities following CAP conventions:
+The adapter supports CAP's localization pattern for multi-language content:
 
 ```cds
 entity Books {
-  key ID : UUID;
-  title : localized String;  // Localized field
-  description : localized String;
+  key ID    : UUID;
+  title     : localized String;
+  abstract  : localized LargeString;
 }
 ```
 
-**Implementation**:
-- Generates `Books_texts` table with locale key
-- Creates `localized_Books` view with COALESCE logic
-- Automatic locale filtering via SESSION_PARAMETER
-- Compatible with CAP i18n patterns
+At deploy time the adapter creates:
 
-See [Localization Guide](./docs/LOCALIZATION.md) for details.
+- `BOOKS_TEXTS` — stores translations per `(ID, locale)` composite key
+- `LOCALIZED_BOOKS` — view with `COALESCE(texts.title, base.title)` fallback to the default locale
 
-## Temporal Data Support
+At query time, the adapter resolves the locale from `Accept-Language` (via `cds.context.locale`) and injects a runtime JOIN on the texts table with the current locale value.
 
-Application-time period tables for historical tracking:
+### Temporal Data
+
+Application-time period tables (time slices) are supported via the `temporal` aspect:
 
 ```cds
 using { temporal } from '@sap/cds/common';
 
-entity WorkAssignments : temporal {
-  key ID : UUID;
-  role : String;
-  department : String;
-  // Inherits: validFrom, validTo with @cds.valid.from/to
+entity Assignments : temporal {
+  key ID    : UUID;
+  role      : String;
+  // Inherits: validFrom : DateTime @cds.valid.from
+  //           validTo   : DateTime @cds.valid.to
 }
 ```
 
-**Implementation**:
-- Composite primary key (ID, validFrom) for time slices
-- Automatic filtering for current time slice
-- Time-travel queries with asOf/from/to
-- Compatible with CAP temporal data patterns
+The adapter generates a `_CURRENT` view that filters to the active slice using `CURRENT_TIMESTAMP BETWEEN validFrom AND validTo`. Point-in-time reads are supported via the `sap-valid-at` request header.
 
-See [Temporal Data Guide](./docs/TEMPORAL.md) for details.
+### Compositions (Deep CRUD)
 
-## CAP Annotations Support
+Entities linked by `Composition of many` participate in deep operations automatically:
 
-The Snowflake adapter supports all major CAP database annotations:
+```cds
+entity Catalogs : cuid, managed {
+  name  : String(100);
+  items : Composition of many CatalogItems on items.catalog = $self;
+}
 
-**Fully Supported**:
-- `@cds.persistence.skip` - Runtime-only entities
-- `@cds.persistence.exists` - Existing database objects
-- `@cds.persistence.name` - Custom table/column names
-- `@readonly` / `@insertonly` - Access control
-- `@mandatory` - NOT NULL constraints
-- `@assert.target` - Foreign key validation
-- `@assert.range` / `@assert.format` - Value validation
-- `@cds.valid.from/to` - Temporal data (time slices)
-- `localized` elements - Multi-language support
-- `cuid`, `managed`, `temporal` aspects - Standard aspects
-- Virtual and calculated elements
-- Compositions & Associations - All relationship types
-- Draft support - @odata.draft.enabled
+entity CatalogItems : cuid, managed {
+  catalog : Association to Catalogs;
+  title   : String(100);
+  price   : Decimal(10,2);
+}
+```
 
-**Partial Support**:
-- `@assert.integrity` - FK constraints (Snowflake metadata only, not enforced)
+- **Deep INSERT**: `POST /Catalogs` with `{ name: '...', items: [...] }` creates parent and all children in a single transaction.
+- **Deep UPDATE**: `PATCH /Catalogs(id)` with an `items` array updates child records.
+- **Cascade DELETE**: `DELETE /Catalogs(id)` automatically deletes all `CatalogItems` children before removing the parent.
 
-See [Annotations Support Guide](./docs/ANNOTATIONS_SUPPORT.md) for complete details.
+### Schema Introspection
 
-## Roadmap
+Import existing Snowflake tables as CDS entity definitions:
 
-**Completed (v1.0)**:
-- Schema introspection - Import existing tables
-- CAP annotations support - Standard CAP compliance
-- Localization - localized entities with .texts tables
-- Temporal data - @cds.valid.from/to support
-- $expand with JOIN optimization - To-one associations via LEFT JOIN, to-many via ARRAY_AGG
-- Path expressions - Navigation through associations in SELECT and WHERE
+```bash
+npx cap-snowflake-import --schema=MY_SCHEMA --output=db/schema.cds
+```
 
-**Planned (v1.1+)**:
-- Advanced migration diffing for `cds deploy` (alter/rename support)
-- Streaming optimizations (adaptive chunking/backpressure tuning)
-- Connection pooling for SQL API
-- Change data capture (CDC) integration
-- Deep nested `$expand` edge-case optimization
+The tool introspects tables and views, converts Snowflake types to CDS types, derives associations from naming conventions, and generates ready-to-use `.cds` files.
 
-**Future (v2.0+)**:
-- Advanced Snowflake features (clustering hints, time travel, result caching)
-- Performance optimizations (statement caching, batch operations)
-- Monitoring and observability integrations
+---
 
-## Contributing
+## CDS Type Mappings
 
-Contributions welcome! Please:
+| CDS Type | Snowflake DDL | Notes |
+|----------|--------------|-------|
+| `String(n)` | `VARCHAR(n)` | Default length: 5000 |
+| `LargeString` | `TEXT` | |
+| `Boolean` | `BOOLEAN` | |
+| `Integer` | `NUMBER(38,0)` | |
+| `Integer64` | `NUMBER(38,0)` | |
+| `Decimal(p,s)` | `NUMBER(p,s)` | |
+| `Double` | `FLOAT` | |
+| `Date` | `DATE` | |
+| `Time` | `TIME` | |
+| `DateTime` | `TIMESTAMP_NTZ` | No timezone |
+| `Timestamp` | `TIMESTAMP_TZ` | With timezone |
+| `UUID` | `VARCHAR(36)` | |
+| `Binary` | `BINARY` | |
+| `Array` | `ARRAY` | |
+| `Json` | `VARIANT` | |
 
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
+---
+
+## Identifier Handling
+
+Snowflake stores unquoted identifiers as uppercase. The adapter uses the CDS entity name convention (dots replaced by underscores, all uppercase) for physical table names, with an application-configurable prefix:
+
+| CDS Entity | Physical Table (with prefix `CAP_APP`) |
+|------------|---------------------------------------|
+| `my.service.Books` | `CAP_APP_MY_SERVICE_BOOKS` |
+| `db.Catalogs` | `CAP_APP_DB_CATALOGS` |
+
+Mixed-case column names that require exact-case preservation are automatically double-quoted in generated SQL.
+
+---
+
+## Limitations
+
+The following are known Snowflake-specific constraints that affect adapter behaviour:
+
+| Item | Detail |
+|------|--------|
+| **Constraints not enforced** | Snowflake `NOT NULL`, `UNIQUE`, and `FOREIGN KEY` constraints are metadata-only and not enforced at DML time. CAP's own validation layer handles mandatory fields and integrity checks. |
+| **No row-level locks** | `FOR UPDATE` / `FOR SHARE` semantics are not available on Snowflake. Draft concurrency relies on draft table state rather than database locks. |
+| **SQL API transactions** | The SQL API (JWT) mode does not support multi-statement transactions. Use SDK mode when full transaction isolation is required. |
+| **Add-only schema evolution** | `cds deploy` adds new columns but does not remove or rename existing columns. Structural renames require manual migration SQL. |
+| **Streaming / LargeBinary** | Binary content is stored as hex-encoded `BINARY` columns. Byte-range streaming is not supported. |
+
+---
+
+## Troubleshooting
+
+### `Failed to generate JWT`
+
+- Verify the private key is in PKCS#8 PEM format.
+- Confirm that `env:SNOWFLAKE_PRIVATE_KEY` resolves to the full key including `-----BEGIN PRIVATE KEY-----` headers.
+- If the key is passphrase-protected, provide `privateKeyPassphrase`.
+
+### `Authentication failed` / `390144`
+
+- The public key registered in Snowflake must match the private key used by the adapter.
+- Run `DESCRIBE USER CAP_USER;` in Snowflake and verify `RSA_PUBLIC_KEY_FP` is set.
+- Account and user identifiers are case-sensitive in JWT claims.
+
+### `Object '<database>.<schema>.<table>' does not exist`
+
+- The physical table name is derived from the CDS entity name. Enable `DEBUG=sql` to inspect the generated statement and compare with `SHOW TABLES` output in Snowflake.
+- Verify that the role in use has `SELECT` / `INSERT` / `UPDATE` / `DELETE` privileges on the schema.
+
+### `Insufficient privileges`
+
+```sql
+GRANT USAGE ON DATABASE CAP_DB TO ROLE CAP_ROLE;
+GRANT USAGE ON SCHEMA CAP_DB.APP TO ROLE CAP_ROLE;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA CAP_DB.APP TO ROLE CAP_ROLE;
+GRANT USAGE ON WAREHOUSE CAP_WH TO ROLE CAP_ROLE;
+```
+
+---
+
+## Development
+
+### Build
+
+```bash
+npm install
+npm run build          # compiles src/ → dist/ (required for cds serve)
+```
+
+### Tests
+
+```bash
+npm run test:unit      # 284 unit tests — no Snowflake connection required
+npm run test:integ     # 52 integration tests — requires .cdsrc-private.json
+npm run test:e2e       # 91 end-to-end HTTP tests — requires live Snowflake
+npm test               # runs all three suites in sequence
+```
+
+For end-to-end tests, place credentials in `test/e2e/fixtures/.cdsrc-private.json`:
+
+```json
+{
+  "requires": {
+    "db": {
+      "credentials": {
+        "account": "...",
+        "user": "...",
+        "database": "...",
+        "schema": "...",
+        "auth": "jwt",
+        "jwt": { "privateKey": "env:SNOWFLAKE_PRIVATE_KEY" }
+      }
+    }
+  }
+}
+```
+
+### Debugging
+
+```bash
+DEBUG=sql npm run test:e2e        # prints all generated SQL statements
+DEBUG=* npm run test:e2e          # full CAP framework debug output
+```
+
+### Lint
+
+```bash
+npm run lint
+```
+
+---
 
 ## License
 
-Apache 2.0
+[Apache 2.0](LICENSE)
+
+---
 
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/your-repo/cap-snowflake/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-repo/cap-snowflake/discussions)
-
-## Acknowledgments
-
-Built with inspiration from [@cap-js/postgres](https://github.com/cap-js/cds-dbs) and the SAP CAP community.
-
+- **CAP Community**: [SAP Community — CAP](https://community.sap.com/topics/cloud-application-programming)
