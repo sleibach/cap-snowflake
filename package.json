@@ -46,7 +46,7 @@
     "reverse-engineering",
     "annotations"
   ],
-  "author": "",
+  "author": "Soeren Leibach",
   "license": "Apache-2.0",
   "dependencies": {
     "@sap/cds": ">=7.0.0",
@@ -74,5 +74,13 @@
   },
   "cds": {
     "kind": "snowflake"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sleibach/cap-snowflake.git"
+  },
+  "homepage": "https://github.com/sleibach/cap-snowflake#readme",
+  "bugs": {
+    "url": "https://github.com/sleibach/cap-snowflake/issues"
   }
 }

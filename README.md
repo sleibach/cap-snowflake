@@ -1,6 +1,6 @@
 # cap-snowflake
 
-SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Application Programming Model.
+SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Application Programming / CDS Model.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
@@ -472,5 +472,5 @@ npm run lint
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/your-repo/cap-snowflake/issues)
+- **Issues**: [GitHub Issues](https://github.com/sleibach/cap-snowflake/issues)
 - **CAP Community**: [SAP Community — CAP](https://community.sap.com/topics/cloud-application-programming)

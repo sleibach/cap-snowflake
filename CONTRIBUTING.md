@@ -12,7 +12,7 @@ Be respectful and constructive in all interactions. We aim to foster an inclusiv
 
 If you find a bug:
 
-1. Check if it's already reported in [GitHub Issues](https://github.com/your-repo/cap-snowflake/issues)
+1. Check if it's already reported in [GitHub Issues](https://github.com/sleibach/cap-snowflake/issues)
 2. If not, create a new issue with:
    - Clear title and description
    - Steps to reproduce
@@ -143,7 +143,7 @@ Great places to start:
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/your-repo/cap-snowflake/discussions)
+- Open a [Discussion](https://github.com/sleibach/cap-snowflake/discussions)
 - Ask in issues with the `question` label
 
 ## License
