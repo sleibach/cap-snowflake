@@ -104,6 +104,14 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 83 | Star Schema | $apply=groupby((dim_col),aggregate) on FACT entity | — | test/e2e/cap-http.test.ts | ✅ |
 | 84 | Star Schema | FACT/DIMENSION annotations in schema introspection | — | test/unit/introspect.test.ts | ✅ unit |
 | 85 | Star Schema | Dimension navigation groupBy (book/title) via cqn4sql JOIN expansion | — | test/unit/cqn-toSQL.test.ts | ✅ unit |
+| **SNOWFLAKE-NATIVE FEATURES** |||||
+| 86 | Snowflake-native | VECTOR type + vectorSearch action | — | test/unit/snowflake-native.test.ts | ✅ |
+| 87 | Snowflake-native | CLUSTER BY (clustering keys DDL) | — | test/unit/snowflake-native.test.ts | ✅ |
+| 88 | Snowflake-native | Time Travel (sap-snowflake-at header) | — | test/unit/snowflake-native.test.ts | ✅ |
+| 89 | Snowflake-native | SEARCH OPTIMIZATION DDL | — | test/unit/snowflake-native.test.ts | ✅ |
+| 90 | Snowflake-native | Column Masking Policy DDL | — | test/unit/snowflake-native.test.ts | ✅ |
+| 91 | Snowflake-native | Row Access Policy DDL | — | test/unit/snowflake-native.test.ts | ✅ |
+| 92 | Snowflake-native | VARIANT colon-path filter syntax | — | test/unit/snowflake-native.test.ts | ✅ |
 
 ---
 
@@ -144,3 +152,4 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 65 | Temporal UPSERT | ✅ basic PUT time-slice test added |
 | 19 | CONCAT/INDEXOF/TRIM | ✅ Explicit cases in translateFunc; INDEXOF is 0-based (POSITION-1) |
 | 82-85 | Star schema support | ✅ SalesFacts entity + introspect annotations + unit + e2e tests |
+| 86-92 | Snowflake-native features | ✅ VECTOR, CLUSTER BY, Time Travel, SEARCH OPTIMIZATION, Masking Policy, Row Access Policy, VARIANT colon-path |

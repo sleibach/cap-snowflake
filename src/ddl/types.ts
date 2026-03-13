@@ -11,11 +11,19 @@ export interface TypeMapping {
 /**
  * Map CDS types to Snowflake types
  */
-export function mapCDSType(cdsType: string, length?: number, precision?: number, scale?: number): string {
+export function mapCDSType(
+  cdsType: string,
+  length?: number,
+  precision?: number,
+  scale?: number,
+  vectorConfig?: { dimensions: number }
+): string {
   // Normalize type (remove cds. prefix if present)
   const normalizedType = cdsType.replace(/^cds\./, '').toLowerCase();
 
   switch (normalizedType) {
+    case 'vector':
+      return `VECTOR(FLOAT, ${vectorConfig?.dimensions ?? 1536})`;
     case 'string':
       return length ? `VARCHAR(${length})` : 'VARCHAR(5000)';
     

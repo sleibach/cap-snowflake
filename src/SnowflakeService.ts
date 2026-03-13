@@ -14,6 +14,8 @@ import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
 import { buildDeployStatements } from './ddl/deploy.js';
 import { isTemporal, getTemporalFields } from './features/temporal.js';
+import { parseTimeTravelHeader, injectTimeTravelClause } from './features/time-travel.js';
+import { getVectorConfig } from './features/snowflake-native.js';
 
 const _require = createRequire(import.meta.url);
 const { onDeep } = _require('@cap-js/db-service/lib/deep-queries');
@@ -103,6 +105,9 @@ export class SnowflakeService extends cds.DatabaseService {
     // Wildcard handler for raw SQL strings (e.g. db.run('SELECT ...'))
     this.on('*', this.onPlainSQL.bind(this));
 
+    // Snowflake-native: vector similarity search action
+    this.on('vectorSearch', this.onVectorSearch.bind(this));
+
     // Call parent init
     return super.init();
   }
@@ -166,7 +171,13 @@ export class SnowflakeService extends cds.DatabaseService {
       }
 
       // Translate to SQL (now with JOIN-based expand support)
-      const { sql, params } = cqnToSQL(transformedQuery, this.credentials, { target: req.target });
+      let { sql, params } = cqnToSQL(transformedQuery, this.credentials, { target: req.target });
+
+      // Snowflake Time Travel: inject AT clause when sap-snowflake-at header is present
+      const timeTravelAt = parseTimeTravelHeader(req.headers ?? {});
+      if (timeTravelAt) {
+        sql = injectTimeTravelClause(sql, timeTravelAt);
+      }
 
       if (this.shouldStreamRead(req, select)) {
         return this.executeStream(sql, params, req?.data?.batchSize);
@@ -704,6 +715,71 @@ export class SnowflakeService extends cds.DatabaseService {
     const effectiveModel = model || (this as any).model;
     await this.handleDeploy(effectiveModel, options);
     return effectiveModel;
+  }
+
+  /**
+   * Snowflake-native: VECTOR similarity search action.
+   *
+   * Invoked via:  await db.run('vectorSearch', { entity, queryVector, topK, similarityFn })
+   *
+   * Parameters:
+   *   entity       — Entity name (e.g. 'my.Books')
+   *   queryVector  — Array of floats representing the query embedding
+   *   topK         — Number of top results to return (default: 10)
+   *   similarityFn — 'COSINE' | 'DOT_PRODUCT' | 'EUCLIDEAN' (default: 'COSINE')
+   *
+   * Finds the vector column on the entity (first element with @Snowflake.vector),
+   * then executes a ranked similarity search using Snowflake's built-in functions.
+   */
+  private async onVectorSearch(req: any): Promise<any> {
+    const { entity, queryVector, topK = 10, similarityFn = 'COSINE' } = req.data ?? {};
+
+    if (!entity || !Array.isArray(queryVector) || queryVector.length === 0) {
+      return req.reject(400, 'vectorSearch requires entity, queryVector (non-empty array)');
+    }
+
+    // Resolve the entity definition to find the vector column
+    const entityDef: any = this.model?.definitions?.[entity];
+    if (!entityDef) {
+      return req.reject(404, `Entity '${entity}' not found in model`);
+    }
+
+    let vectorCol: string | undefined;
+    const elements: Record<string, any> = entityDef.elements ?? {};
+    for (const [name, el] of Object.entries(elements)) {
+      if (getVectorConfig(el)) {
+        vectorCol = name.toUpperCase();
+        break;
+      }
+    }
+
+    if (!vectorCol) {
+      return req.reject(400, `Entity '${entity}' has no @Snowflake.vector element`);
+    }
+
+    const { qualifyName: qualify } = await import('./identifiers.js');
+    const tableName: string = entityDef['@cds.persistence.name'] ?? entity.replace(/\./g, '_').toUpperCase();
+    const qualifiedTable = qualify(tableName, this.credentials);
+
+    const vecLiteral = `[${queryVector.join(',')}]::VECTOR(FLOAT, ${queryVector.length})`;
+    const fnMap: Record<string, string> = {
+      COSINE: 'VECTOR_COSINE_SIMILARITY',
+      DOT_PRODUCT: 'VECTOR_INNER_PRODUCT',
+      EUCLIDEAN: 'VECTOR_L2_DISTANCE',
+    };
+    const fn = fnMap[similarityFn.toUpperCase()] ?? 'VECTOR_COSINE_SIMILARITY';
+    // For distance functions (L2), lower is better — use ASC; for similarity, DESC
+    const order = fn === 'VECTOR_L2_DISTANCE' ? 'ASC' : 'DESC';
+
+    const sql = `SELECT *, ${fn}(${vectorCol}, ${vecLiteral}) AS _score FROM ${qualifiedTable} ORDER BY _score ${order} LIMIT ${Number(topK)}`;
+
+    try {
+      const rows = await this.execute(sql, []);
+      return rows;
+    } catch (error) {
+      logError('vectorSearch failed', error);
+      throw normalizeError(error);
+    }
   }
 
   private async handleDeploy(model: any, options?: any): Promise<void> {

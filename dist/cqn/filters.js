@@ -72,14 +72,14 @@ function translateExpression(xpr, params, baseAlias, isDraft, sqlContext) {
                     continue;
                 }
                 // For IS NULL / IS NOT NULL patterns or bare refs, translateRef returns 'NULL'
-                parts.push(translateRef(element.ref, baseAlias, isDraft));
+                parts.push(translateRef(element.ref, baseAlias, isDraft, sqlContext));
                 continue;
             }
             if (element.ref && element.lambda) {
                 parts.push(translateLambda(element, params));
             }
             else if (element.ref) {
-                parts.push(translateRef(element.ref, baseAlias, isDraft));
+                parts.push(translateRef(element.ref, baseAlias, isDraft, sqlContext));
             }
             else if ('val' in element) {
                 parts.push(translateVal(element.val, params));
@@ -163,7 +163,7 @@ function refPartToString(part) {
     }
     return String(part);
 }
-function translateRef(ref, baseAlias, isDraft) {
+function translateRef(ref, baseAlias, isDraft, sqlContext) {
     if (ref.length === 1) {
         const partStr = refPartToString(ref[0]);
         // On draft tables, draft columns are physical — use them directly
@@ -180,6 +180,17 @@ function translateRef(ref, baseAlias, isDraft) {
     const firstStr = refPartToString(ref[0]);
     if (DRAFT_NAV_ENTITIES.has(firstStr.toLowerCase()))
         return 'NULL';
+    // VARIANT colon-path syntax: when first element is a @Snowflake.variant column,
+    // translate ref: ['payload', 'nested', 'key'] → PAYLOAD:nested:key::VARCHAR
+    if (ref.length > 1 && sqlContext?.target?.elements) {
+        const firstEl = sqlContext.target.elements[firstStr] ?? sqlContext.target.elements[firstStr.toLowerCase()];
+        if (firstEl?.['@Snowflake.variant'] === true) {
+            const colName = toPhysicalIdentifier(firstStr);
+            const pathParts = ref.slice(1).map((p) => refPartToString(p));
+            const variantBase = baseAlias ? `${baseAlias}.${colName}` : colName;
+            return `${variantBase}:${pathParts.join(':')}::VARCHAR`;
+        }
+    }
     // Multiple parts: table.column or alias.column
     // The first part is a table alias (preserve case with quoteIdentifier),
     // remaining parts are physical column names (uppercase with toPhysicalIdentifier).

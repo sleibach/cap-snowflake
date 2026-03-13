@@ -6,6 +6,7 @@ import { mapCDSType } from './types.js';
 import { qualifyName, toPhysicalIdentifier } from '../identifiers.js';
 import { extractLocalizedElements, generateLocalizedView, generateTextsTable, getEntityKeys, hasLocalizedElements } from '../features/localized.js';
 import { generateTemporalTableDDL, generateTemporalView, isTemporal } from '../features/temporal.js';
+import { getVectorConfig, getClusteringKeys, getDataRetentionDays, isSearchOptimized, getMaskingPolicy, getRowAccessPolicy, getTags, getExternalTableConfig, } from '../features/snowflake-native.js';
 /**
  * Generate CREATE TABLE statement
  */
@@ -34,7 +35,7 @@ export function generateCreateTable(entity, credentials, ifNotExists = true) {
  */
 export function generateColumnDefinition(name, element) {
     const quotedName = toPhysicalIdentifier(name);
-    const sqlType = mapCDSType(element.type, element.length, element.precision, element.scale);
+    const sqlType = mapCDSType(element.type, element.length, element.precision, element.scale, element.vectorConfig);
     let def = `${quotedName} ${sqlType}`;
     // Add constraints
     if (element.notNull) {
@@ -151,12 +152,19 @@ export function buildDeployStatements(model, credentials, options = {}) {
         const entityDef = toEntityDefinition(tableName, def);
         if (Object.keys(entityDef.elements).length === 0)
             continue;
-        if (isTemporal(def)) {
+        const externalCfg = getExternalTableConfig(def);
+        if (externalCfg) {
+            statements.push(generateExternalTable(tableName, externalCfg.stage, externalCfg.fileFormat, externalCfg.pattern, credentials));
+        }
+        else if (isTemporal(def)) {
             statements.push(generateTemporalTableDDL({ ...def, name: tableName }, credentials));
         }
         else {
             statements.push(generateCreateTable(entityDef, credentials, true));
         }
+        // Post-DDL: apply Snowflake-native annotation-driven ALTER statements
+        const annotationStatements = buildSnowflakeAnnotationStatements(tableName, def, credentials);
+        statements.push(...annotationStatements);
         if (hasLocalizedElements(def)) {
             const keys = getEntityKeys(def);
             if (keys.length > 0) {
@@ -255,6 +263,86 @@ export function generateMigrationStatements(model, existingCols, credentials) {
     }
     return statements;
 }
+/**
+ * Generate a CREATE EXTERNAL TABLE statement for entities annotated with @Snowflake.external.
+ */
+export function generateExternalTable(tableName, stage, fileFormat, pattern, credentials) {
+    const qualifiedName = qualifyName(tableName, credentials);
+    let sql = `CREATE EXTERNAL TABLE IF NOT EXISTS ${qualifiedName}`;
+    sql += `\n  WITH LOCATION = @${stage}`;
+    if (pattern) {
+        sql += `\n  PATTERN = '${pattern.replace(/'/g, "''")}'`;
+    }
+    sql += `\n  FILE_FORMAT = (FORMAT_NAME = '${fileFormat.replace(/'/g, "''")}')`;
+    return sql;
+}
+/**
+ * Build ALTER TABLE statements to apply @Snowflake.* annotation-driven features
+ * after the base CREATE TABLE statement has been issued.
+ *
+ * This function is synchronous and returns an array of DDL strings.
+ * The caller is responsible for executing them in order.
+ *
+ * Supported annotations (entity-level unless noted):
+ *   @Snowflake.clustering        → ALTER TABLE ... CLUSTER BY (col1, col2)
+ *   @Snowflake.dataRetentionDays → ALTER TABLE ... SET DATA_RETENTION_TIME_IN_DAYS = n
+ *   @Snowflake.searchOptimized   → ALTER TABLE ... ADD SEARCH OPTIMIZATION
+ *   @Snowflake.tags              → ALTER TABLE ... SET TAG key = 'value'
+ *   @Snowflake.rowAccessPolicy   → ALTER TABLE ... ADD ROW ACCESS POLICY policy ON (cols)
+ *   @Snowflake.maskingPolicy     → ALTER TABLE ... MODIFY COLUMN col SET MASKING POLICY policy
+ *   @Snowflake.tags (per-column) → ALTER TABLE ... MODIFY COLUMN col SET TAG key = 'value'
+ */
+export function buildSnowflakeAnnotationStatements(entityName, definition, credentials) {
+    const statements = [];
+    const qualifiedTable = qualifyName(entityName, credentials);
+    // CLUSTER BY
+    const clusteringKeys = getClusteringKeys(definition);
+    if (clusteringKeys && clusteringKeys.length > 0) {
+        const cols = clusteringKeys.map(k => toPhysicalIdentifier(k)).join(', ');
+        statements.push(`ALTER TABLE ${qualifiedTable} CLUSTER BY (${cols})`);
+    }
+    // DATA RETENTION
+    const retentionDays = getDataRetentionDays(definition);
+    if (retentionDays !== undefined) {
+        statements.push(`ALTER TABLE ${qualifiedTable} SET DATA_RETENTION_TIME_IN_DAYS = ${retentionDays}`);
+    }
+    // SEARCH OPTIMIZATION
+    if (isSearchOptimized(definition)) {
+        statements.push(`ALTER TABLE ${qualifiedTable} ADD SEARCH OPTIMIZATION`);
+    }
+    // TABLE-LEVEL TAGS
+    const tableTags = getTags(definition);
+    if (tableTags) {
+        for (const tag of tableTags) {
+            const safeVal = tag.value.replace(/'/g, "''");
+            statements.push(`ALTER TABLE ${qualifiedTable} SET TAG ${tag.key} = '${safeVal}'`);
+        }
+    }
+    // ROW ACCESS POLICY
+    const rowPolicy = getRowAccessPolicy(definition);
+    if (rowPolicy) {
+        const onCols = rowPolicy.on.map(c => toPhysicalIdentifier(c)).join(', ');
+        statements.push(`ALTER TABLE ${qualifiedTable} ADD ROW ACCESS POLICY ${rowPolicy.policy} ON (${onCols})`);
+    }
+    // Per-column: MASKING POLICY + TAGS
+    const elements = definition.elements ?? {};
+    for (const [colName, element] of Object.entries(elements)) {
+        const el = element;
+        const physCol = toPhysicalIdentifier(colName);
+        const maskingPolicy = getMaskingPolicy(el);
+        if (maskingPolicy) {
+            statements.push(`ALTER TABLE ${qualifiedTable} MODIFY COLUMN ${physCol} SET MASKING POLICY ${maskingPolicy}`);
+        }
+        const colTags = getTags(el);
+        if (colTags) {
+            for (const tag of colTags) {
+                const safeVal = tag.value.replace(/'/g, "''");
+                statements.push(`ALTER TABLE ${qualifiedTable} MODIFY COLUMN ${physCol} SET TAG ${tag.key} = '${safeVal}'`);
+            }
+        }
+    }
+    return statements;
+}
 function getPersistenceName(name, definition) {
     const customName = definition['@cds.persistence.name'];
     if (typeof customName === 'string' && customName.length > 0) {
@@ -276,14 +364,16 @@ function toEntityDefinition(name, definition) {
             continue;
         if (!element.type)
             continue;
+        const vectorCfg = getVectorConfig(element);
         mappedElements[elementName] = {
-            type: element.type,
+            type: vectorCfg ? 'vector' : element.type,
             length: element.length,
             precision: element.precision,
             scale: element.scale,
             key: element.key,
             notNull: element.notNull || element.key || element['@mandatory'] === true,
-            default: element.default?.val
+            default: element.default?.val,
+            vectorConfig: vectorCfg,
         };
     }
     return {

@@ -11,6 +11,48 @@ SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Ap
 
 ---
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Prerequisites](#prerequisites)
+3. [Installation](#installation)
+4. [Quick Start](#quick-start)
+5. [Authentication](#authentication)
+   - [JWT Key-Pair](#jwt-key-pair-recommended)
+   - [SDK / Password](#sdk--password)
+6. [Configuration Reference](#configuration-reference)
+7. [Schema Deployment](#schema-deployment)
+8. [OData V4 Feature Coverage](#odata-v4-feature-coverage)
+   - [Query Capabilities](#query-capabilities)
+   - [$expand Support](#expand-support)
+   - [Data Modification](#data-modification)
+   - [OData Draft (Fiori Elements)](#odata-draft-fiori-elements)
+9. [Advanced Features](#advanced-features)
+   - [Localization](#localization)
+   - [Temporal Data](#temporal-data)
+   - [Compositions (Deep CRUD)](#compositions-deep-crud)
+   - [Star Schema and Analytics](#star-schema-and-analytics)
+   - [Schema Introspection](#schema-introspection)
+10. [Snowflake-Native Features](#snowflake-native-features)
+    - [VECTOR Type and Similarity Search](#vector-type-and-similarity-search)
+    - [Clustering Keys](#clustering-keys)
+    - [Time Travel](#time-travel)
+    - [Search Optimization](#search-optimization)
+    - [Column Masking Policies](#column-masking-policies)
+    - [Row Access Policies](#row-access-policies)
+    - [Object and Column Tags](#object-and-column-tags)
+    - [VARIANT Colon-Path Filters](#variant-colon-path-filters)
+    - [External Tables](#external-tables)
+11. [CDS Type Mappings](#cds-type-mappings)
+12. [Identifier Handling](#identifier-handling)
+13. [Limitations](#limitations)
+14. [Troubleshooting](#troubleshooting)
+15. [Development](#development)
+16. [License](#license)
+17. [Support](#support)
+
+---
+
 ## Overview
 
 `cap-snowflake` implements the `cds.DatabaseService` interface from `@cap-js/db-service`, allowing Snowflake to serve as the persistence layer for SAP CAP applications. It translates CAP Query Notation (CQN) to Snowflake SQL and provides full OData V4 compatibility for CAP services.
@@ -187,10 +229,15 @@ cds deploy --to snowflake
 | Localized views | `localized_<Entity>` views with COALESCE locale fallback |
 | Draft tables | `<Entity>.drafts` tables for `@odata.draft.enabled` entities |
 | Temporal views | `<Entity>_current` views for temporal entities |
+| External tables | `CREATE EXTERNAL TABLE` for entities with `@Snowflake.external` |
 
 **Schema evolution:**
 
 Re-running `cds deploy` on an existing database is idempotent — tables already present are preserved. New columns are added with `ALTER TABLE ... ADD COLUMN`. The adapter follows an add-only policy; column removal requires explicit migration SQL.
+
+**Post-DDL Snowflake annotation pass:**
+
+After each `CREATE TABLE`, the adapter automatically runs additional `ALTER TABLE` statements to apply Snowflake-specific annotations declared in the CDS model (clustering keys, data retention, search optimization, masking policies, row access policies, and tags). See [Snowflake-Native Features](#snowflake-native-features) for details.
 
 ---
 
@@ -203,6 +250,9 @@ Re-running `cds deploy` on an existing database is idempotent — tables already
 | Column projection | `$select=field1,field2` | ✅ |
 | Equality / comparison filters | `$filter=price gt 10` | ✅ |
 | String functions | `$filter=contains(title,'cap')` | ✅ |
+| String concatenation | `$filter=concat(firstName,' ',lastName) eq 'John Doe'` | ✅ |
+| String position | `$filter=indexof(title,'cap') ge 0` | ✅ |
+| String trimming | `$filter=trim(name) eq 'Alice'` | ✅ |
 | Case functions | `$filter=tolower(title) eq 'cap'` | ✅ |
 | Math functions | `$filter=round(price) eq 20` | ✅ |
 | Date/time functions | `$filter=year(createdAt) eq 2024` | ✅ |
@@ -229,6 +279,7 @@ Re-running `cds deploy` on an existing database is idempotent — tables already
 | `$expand` with `$filter` | ✅ |
 | `$expand` with `$orderby` | ✅ |
 | `$expand` with `$top`/`$skip` | ✅ |
+| `$expand` with `$count` | ✅ |
 | Navigation property read | ✅ |
 
 ### Data Modification
@@ -246,6 +297,7 @@ Re-running `cds deploy` on an existing database is idempotent — tables already
 | DELETE single entity | ✅ |
 | CASCADE DELETE (compositions) | ✅ |
 | UPSERT (MERGE) | ✅ |
+| 404 on PATCH/DELETE of non-existent entity | ✅ |
 
 ### OData Draft (Fiori Elements)
 
@@ -321,6 +373,47 @@ entity CatalogItems : cuid, managed {
 - **Deep UPDATE**: `PATCH /Catalogs(id)` with an `items` array updates child records.
 - **Cascade DELETE**: `DELETE /Catalogs(id)` automatically deletes all `CatalogItems` children before removing the parent.
 
+### Star Schema and Analytics
+
+The adapter fully supports Snowflake star schema patterns for analytical workloads. A fact table with FK associations to dimension tables can be queried with `$apply` groupby expressions that navigate through association paths:
+
+```cds
+entity SalesFacts : cuid, managed {
+  book    : Association to Books;
+  region  : String(50);
+  channel : String(50);
+  amount  : Decimal(10,2);
+  units   : Integer;
+}
+```
+
+**OData `$apply` examples:**
+
+```
+# Simple measure aggregation
+GET /SalesFacts?$apply=aggregate(units with sum as totalUnits)
+
+# Groupby a local dimension column
+GET /SalesFacts?$apply=groupby((channel),aggregate(amount with sum as totalAmount))
+
+# Groupby a navigation path (requires JOIN into dimension table)
+GET /SalesFacts?$apply=groupby((book/title),aggregate(units with sum as totalUnits))
+```
+
+Navigation-path groupby expressions (e.g. `book/title`) are resolved by `cqn4sql` into proper JOINs before reaching the adapter, following the same pattern as HANA and SQLite adapters.
+
+**Schema introspection annotations:**
+
+When reverse-engineering a Snowflake schema, the introspector automatically annotates entities with `@Analytics.dataCategory` and measure columns with `@Aggregation.default` based on structural heuristics (association count, column types):
+
+```cds
+@Analytics.dataCategory: #FACT
+entity SalesFacts { ... }
+
+@Analytics.dataCategory: #DIMENSION
+entity Books { ... }
+```
+
 ### Schema Introspection
 
 Import existing Snowflake tables as CDS entity definitions:
@@ -329,7 +422,253 @@ Import existing Snowflake tables as CDS entity definitions:
 npx cap-snowflake-import --schema=MY_SCHEMA --output=db/schema.cds
 ```
 
-The tool introspects tables and views, converts Snowflake types to CDS types, derives associations from naming conventions, and generates ready-to-use `.cds` files.
+The tool introspects tables and views, converts Snowflake types to CDS types, derives associations from naming conventions, and generates ready-to-use `.cds` files. Fact and dimension tables are annotated automatically based on association structure.
+
+---
+
+## Snowflake-Native Features
+
+The `@Snowflake.*` annotation namespace lets you express Snowflake-specific capabilities directly in the CDS model without leaving the model layer. The adapter's deployment pass translates these annotations into the appropriate DDL statements after the base `CREATE TABLE`.
+
+The annotation vocabulary is defined in `src/annotations/snowflake.cds`. No additional imports are required — annotations are read from the compiled CSN at deploy time.
+
+### VECTOR Type and Similarity Search
+
+Mark a column as a Snowflake VECTOR column for storing machine-learning embeddings:
+
+```cds
+entity EmbeddedDocs {
+  key ID      : UUID;
+  content     : String;
+  embedding   : String  @Snowflake.vector: { dimensions: 1536, similarity: 'COSINE' };
+}
+```
+
+**DDL generated:**
+
+```sql
+EMBEDDING VECTOR(FLOAT, 1536)
+```
+
+**Supported similarity functions:**
+
+| Annotation value | Snowflake function |
+|------------------|--------------------|
+| `COSINE` (default) | `VECTOR_COSINE_SIMILARITY` |
+| `DOT_PRODUCT` | `VECTOR_INNER_PRODUCT` |
+| `EUCLIDEAN` | `VECTOR_L2_DISTANCE` |
+
+**`vectorSearch` action:**
+
+The adapter exposes a `vectorSearch` action for ranked similarity queries:
+
+```js
+const results = await db.run('vectorSearch', {
+  entity:       'my.EmbeddedDocs',
+  queryVector:  [0.1, 0.2, ...],   // float array matching column dimensions
+  topK:         10,                 // default: 10
+  similarityFn: 'COSINE',          // default: 'COSINE'
+});
+// Returns rows ordered by similarity score (_score field added)
+```
+
+**Generated SQL (COSINE example):**
+
+```sql
+SELECT *, VECTOR_COSINE_SIMILARITY(EMBEDDING, [...]::VECTOR(FLOAT, 1536)) AS _score
+FROM MY_DB.MY_SCHEMA.MY_EMBEDDEDDOCS
+ORDER BY _score DESC
+LIMIT 10
+```
+
+### Clustering Keys
+
+Define a Snowflake micro-partition clustering key on a table. This improves pruning performance for large tables that are frequently filtered on specific columns.
+
+```cds
+@Snowflake.clustering: ['createdAt', 'region']
+entity Events : cuid, managed {
+  region    : String(50);
+  eventType : String(100);
+}
+```
+
+**DDL generated (post-CREATE):**
+
+```sql
+ALTER TABLE EVENTS CLUSTER BY (CREATEDAT, REGION)
+```
+
+### Time Travel
+
+Query data as it existed at a specific point in the past using Snowflake's Time Travel feature. Include the `sap-snowflake-at` HTTP header with an ISO 8601 timestamp in any OData GET request:
+
+```http
+GET /odata/v4/my/Books
+sap-snowflake-at: 2024-01-15T10:30:00Z
+```
+
+The adapter injects a Snowflake `AT` clause into the generated SQL:
+
+```sql
+SELECT * FROM "DB"."SCHEMA"."BOOKS"
+  AT (TIMESTAMP => '2024-01-15T10:30:00Z'::TIMESTAMP_TZ)
+WHERE ...
+```
+
+**Data retention** must be configured on the table (Snowflake default is 1 day for standard edition):
+
+```cds
+@Snowflake.dataRetentionDays: 7
+entity Orders : cuid, managed { ... }
+```
+
+**DDL generated (post-CREATE):**
+
+```sql
+ALTER TABLE ORDERS SET DATA_RETENTION_TIME_IN_DAYS = 7
+```
+
+Set `@Snowflake.dataRetentionDays: 0` to disable Time Travel for a table.
+
+### Search Optimization
+
+Enable Snowflake's Search Optimization Service for fast point-lookup queries on large tables:
+
+```cds
+@Snowflake.searchOptimized: true
+entity Products : cuid, managed {
+  sku   : String(50);
+  name  : String(200);
+}
+```
+
+**DDL generated (post-CREATE):**
+
+```sql
+ALTER TABLE PRODUCTS ADD SEARCH OPTIMIZATION
+```
+
+> Note: Search Optimization requires Snowflake Enterprise Edition or higher and incurs additional storage cost.
+
+### Column Masking Policies
+
+Apply a Snowflake Dynamic Data Masking policy to protect sensitive column values. The policy must already exist in Snowflake before deployment.
+
+```cds
+entity Customers : cuid {
+  name  : String(100);
+  email : String(200)  @Snowflake.maskingPolicy: 'MY_SCHEMA.EMAIL_MASK';
+  ssn   : String(11)   @Snowflake.maskingPolicy: 'MY_SCHEMA.SSN_MASK';
+}
+```
+
+**DDL generated (post-CREATE, per column):**
+
+```sql
+ALTER TABLE CUSTOMERS MODIFY COLUMN EMAIL SET MASKING POLICY MY_SCHEMA.EMAIL_MASK;
+ALTER TABLE CUSTOMERS MODIFY COLUMN SSN   SET MASKING POLICY MY_SCHEMA.SSN_MASK;
+```
+
+### Row Access Policies
+
+Enforce row-level security by attaching a Snowflake Row Access Policy. The policy must already exist in Snowflake before deployment.
+
+```cds
+@Snowflake.rowAccessPolicy: {
+  policy : 'MY_SCHEMA.TENANT_ROW_POLICY',
+  on     : ['TENANT_ID']
+}
+entity TenantData : cuid {
+  tenantId : String(36);
+  payload  : String(500);
+}
+```
+
+**DDL generated (post-CREATE):**
+
+```sql
+ALTER TABLE TENANTDATA ADD ROW ACCESS POLICY MY_SCHEMA.TENANT_ROW_POLICY ON (TENANT_ID)
+```
+
+### Object and Column Tags
+
+Attach Snowflake object tags to tables or individual columns for governance, cost attribution, or data classification:
+
+```cds
+// Table-level tags
+@Snowflake.tags: [
+  { key: 'team',        value: 'data-engineering' },
+  { key: 'cost-center', value: 'CC-1234' }
+]
+entity Orders : cuid, managed {
+
+  // Column-level tags
+  email : String(200)  @Snowflake.tags: [{ key: 'pii', value: 'true' }];
+}
+```
+
+**DDL generated (post-CREATE):**
+
+```sql
+-- Table tags
+ALTER TABLE ORDERS SET TAG team = 'data-engineering';
+ALTER TABLE ORDERS SET TAG cost-center = 'CC-1234';
+
+-- Column tags
+ALTER TABLE ORDERS MODIFY COLUMN EMAIL SET TAG pii = 'true';
+```
+
+### VARIANT Colon-Path Filters
+
+When a column is typed as Snowflake `VARIANT` (or annotated `@Snowflake.variant: true`), OData filter expressions that reference nested paths are automatically translated to Snowflake's colon-path syntax with a `::VARCHAR` cast.
+
+```cds
+entity Events : cuid {
+  payload : Json  @Snowflake.variant: true;
+}
+```
+
+**OData filter:**
+
+```
+GET /Events?$filter=payload/status eq 'active'
+GET /Events?$filter=payload/nested/key eq 'value'
+```
+
+**Generated SQL:**
+
+```sql
+WHERE PAYLOAD:status::VARCHAR = ?
+WHERE PAYLOAD:nested:key::VARCHAR = ?
+```
+
+This allows filtering into arbitrarily nested semi-structured data without defining a fixed schema upfront.
+
+### External Tables
+
+Expose an external stage (S3, Azure Blob, GCS) as a CDS entity backed by a Snowflake External Table. The stage and file format must already exist in Snowflake.
+
+```cds
+@Snowflake.external: {
+  stage      : 'MY_STAGE',
+  fileFormat : 'MY_PARQUET_FORMAT',
+  pattern    : '.*\\.parquet'
+}
+entity RawEvents {
+  key ID : UUID;
+  // columns map to external file columns via Snowflake schema-on-read
+}
+```
+
+**DDL generated (instead of CREATE TABLE):**
+
+```sql
+CREATE EXTERNAL TABLE IF NOT EXISTS "DB"."SCHEMA"."RAWEVENTS"
+  WITH LOCATION = @MY_STAGE
+  PATTERN = '.*\.parquet'
+  FILE_FORMAT = (FORMAT_NAME = 'MY_PARQUET_FORMAT')
+```
 
 ---
 
@@ -352,6 +691,7 @@ The tool introspects tables and views, converts Snowflake types to CDS types, de
 | `Binary` | `BINARY` | |
 | `Array` | `ARRAY` | |
 | `Json` | `VARIANT` | |
+| *(custom)* `@Snowflake.vector` | `VECTOR(FLOAT, n)` | Dimension count from annotation |
 
 ---
 
@@ -379,6 +719,9 @@ The following are known Snowflake-specific constraints that affect adapter behav
 | **SQL API transactions** | The SQL API (JWT) mode does not support multi-statement transactions. Use SDK mode when full transaction isolation is required. |
 | **Add-only schema evolution** | `cds deploy` adds new columns but does not remove or rename existing columns. Structural renames require manual migration SQL. |
 | **Streaming / LargeBinary** | Binary content is stored as hex-encoded `BINARY` columns. Byte-range streaming is not supported. |
+| **Search Optimization cost** | `@Snowflake.searchOptimized` requires Enterprise Edition and adds storage overhead. Evaluate before applying broadly. |
+| **External table reads only** | Entities annotated with `@Snowflake.external` are read-only; INSERT/UPDATE/DELETE against external tables is not supported by Snowflake. |
+| **Masking/row policies pre-exist** | `@Snowflake.maskingPolicy` and `@Snowflake.rowAccessPolicy` reference policies that must be created in Snowflake before `cds deploy` is run. |
 
 ---
 
@@ -400,6 +743,10 @@ The following are known Snowflake-specific constraints that affect adapter behav
 
 - The physical table name is derived from the CDS entity name. Enable `DEBUG=sql` to inspect the generated statement and compare with `SHOW TABLES` output in Snowflake.
 - Verify that the role in use has `SELECT` / `INSERT` / `UPDATE` / `DELETE` privileges on the schema.
+
+### `Masking policy does not exist` during deploy
+
+- The masking policy referenced by `@Snowflake.maskingPolicy` must be created in Snowflake before running `cds deploy`. Create the policy first, then deploy.
 
 ### `Insufficient privileges`
 
@@ -424,9 +771,9 @@ npm run build          # compiles src/ → dist/ (required for cds serve)
 ### Tests
 
 ```bash
-npm run test:unit      # 284 unit tests — no Snowflake connection required
-npm run test:integ     # 52 integration tests — requires .cdsrc-private.json
-npm run test:e2e       # 91 end-to-end HTTP tests — requires live Snowflake
+npm run test:unit      # 364 unit tests — no Snowflake connection required
+npm run test:integ     # 55 integration tests — requires .cdsrc-private.json
+npm run test:e2e       # 119 end-to-end HTTP tests — requires live Snowflake
 npm test               # runs all three suites in sequence
 ```
 

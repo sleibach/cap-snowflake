@@ -197,7 +197,4 @@ DEBUG=* npm test          # full CDS debug output
 
 ## Non-Goals (do NOT work on these)
 
-- UI development / Fiori app code
-- Authentication / XSUAA setup
-- CI/CD pipeline
 - npm publishing / packaging

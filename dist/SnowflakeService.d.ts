@@ -105,6 +105,21 @@ export declare class SnowflakeService extends cds.DatabaseService {
      * Deploy database schema (for cds deploy)
      */
     deploy(model?: any, options?: any): Promise<any>;
+    /**
+     * Snowflake-native: VECTOR similarity search action.
+     *
+     * Invoked via:  await db.run('vectorSearch', { entity, queryVector, topK, similarityFn })
+     *
+     * Parameters:
+     *   entity       — Entity name (e.g. 'my.Books')
+     *   queryVector  — Array of floats representing the query embedding
+     *   topK         — Number of top results to return (default: 10)
+     *   similarityFn — 'COSINE' | 'DOT_PRODUCT' | 'EUCLIDEAN' (default: 'COSINE')
+     *
+     * Finds the vector column on the entity (first element with @Snowflake.vector),
+     * then executes a ranked similarity search using Snowflake's built-in functions.
+     */
+    private onVectorSearch;
     private handleDeploy;
 }
 export default SnowflakeService;

@@ -9,7 +9,9 @@ export interface TypeMapping {
 /**
  * Map CDS types to Snowflake types
  */
-export declare function mapCDSType(cdsType: string, length?: number, precision?: number, scale?: number): string;
+export declare function mapCDSType(cdsType: string, length?: number, precision?: number, scale?: number, vectorConfig?: {
+    dimensions: number;
+}): string;
 /**
  * Map Snowflake types back to CDS types (for reverse engineering)
  */
