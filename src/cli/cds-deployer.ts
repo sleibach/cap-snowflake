@@ -9,6 +9,7 @@
 
 import cds from '@sap/cds';
 import { buildDeployStatements } from '../ddl/deploy.js';
+import { loadCsvData } from '../ddl/csv.js';
 import { SnowflakeSQLAPIClient } from '../client/sqlapi.js';
 import { SnowflakeSDKClient } from '../client/sdk.js';
 import { SnowflakeCredentials } from '../config.js';
@@ -70,6 +71,14 @@ export async function deploy(_model: any, _db: string | undefined, options: any)
         continue;
       }
       throw err;
+    }
+  }
+
+  // Load CSV initial data (db/data/*.csv) — idempotent MERGE
+  if (!options.dry && !options.xdry) {
+    const csvResult = await loadCsvData(model, creds, client);
+    if (csvResult.loaded > 0 && Array.isArray(options.messages)) {
+      options.messages.push({ msg: `  ✓  Loaded ${csvResult.loaded} rows from CSV data files` });
     }
   }
 }

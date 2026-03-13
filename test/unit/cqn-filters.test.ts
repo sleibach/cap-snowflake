@@ -401,3 +401,52 @@ describe('translateSearch', () => {
     expect(result).to.not.include('STOCK');
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe('Subquery filters (#6)', () => {
+  it('translates { SELECT } in WHERE to (SELECT ...) using translateSelect callback', () => {
+    const params: any[] = [];
+
+    // Simulated CQN: WHERE ID IN (SELECT author_ID FROM BOOKS WHERE PRICE > ?)
+    const xpr = [
+      { ref: ['ID'] },
+      'IN',
+      {
+        SELECT: {
+          from: { ref: ['cap_e2e.Books'] },
+          columns: [{ ref: ['author_ID'] }],
+          where: [{ ref: ['price'] }, '>', { val: 30 }],
+        },
+      },
+    ];
+
+    // Provide a translateSelect callback that produces deterministic SQL
+    const ctx = {
+      translateSelect: (selectBody: any, outerParams: any[]) => {
+        // Simplified translator for test purposes
+        outerParams.push(selectBody.where[2].val); // push the price value
+        return `SELECT AUTHOR_ID FROM CAP_E2E_BOOKS WHERE PRICE > ?`;
+      },
+    };
+
+    const result = translateFilter(xpr, params, undefined, undefined, ctx);
+
+    expect(result).to.equal('ID IN (SELECT AUTHOR_ID FROM CAP_E2E_BOOKS WHERE PRICE > ?)');
+    expect(params).to.deep.equal([30]);
+  });
+
+  it('emits fallback placeholder when translateSelect is not provided', () => {
+    const params: any[] = [];
+    const xpr = [
+      { ref: ['ID'] },
+      'IN',
+      { SELECT: { from: { ref: ['SomeEntity'] }, columns: [{ ref: ['ID'] }] } },
+    ];
+
+    // No sqlContext provided — should not throw
+    const result = translateFilter(xpr, params);
+    expect(result).to.include('SELECT NULL WHERE 1=0');
+  });
+
+});

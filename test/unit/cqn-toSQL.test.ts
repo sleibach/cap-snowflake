@@ -595,4 +595,86 @@ describe('CQN to SQL Translation', () => {
       expect(result.sql).to.include('AUTHOR_ID');
     });
   });
+
+  // ---------------------------------------------------------------------------
+
+  describe('Subquery in WHERE (#6)', () => {
+    it('translates { SELECT } subquery in WHERE — ID IN (SELECT ...)', () => {
+      const cqn = {
+        SELECT: {
+          from: { ref: ['cap_e2e.Authors'] },
+          where: [
+            { ref: ['ID'] },
+            'in',
+            {
+              SELECT: {
+                from: { ref: ['cap_e2e.Books'] },
+                columns: [{ ref: ['author_ID'] }],
+                where: [{ ref: ['price'] }, '>', { val: 30 }],
+              },
+            },
+          ],
+        },
+      };
+
+      const { sql, params } = cqnToSQL(cqn, credentials);
+
+      expect(sql).to.match(/WHERE ID IN \(/i);
+      expect(sql).to.include('SELECT');
+      expect(sql).to.include('PRICE > ?');
+      expect(params).to.include(30);
+    });
+
+    it('subquery params appended to outer params in correct order', () => {
+      const cqn = {
+        SELECT: {
+          from: { ref: ['cap_e2e.Authors'] },
+          where: [
+            { ref: ['country'] }, '=', { val: 'US' },
+            'and',
+            { ref: ['ID'] },
+            'in',
+            {
+              SELECT: {
+                from: { ref: ['cap_e2e.Books'] },
+                columns: [{ ref: ['author_ID'] }],
+                where: [{ ref: ['price'] }, '>', { val: 50 }],
+              },
+            },
+          ],
+        },
+      };
+
+      const { sql, params } = cqnToSQL(cqn, credentials);
+
+      expect(sql).to.include('COUNTRY = ?');
+      expect(sql).to.include('IN (');
+      expect(sql).to.include('PRICE > ?');
+      expect(params[0]).to.equal('US');
+      expect(params[1]).to.equal(50);
+    });
+
+    it('handles NOT followed by IN subquery', () => {
+      const cqn = {
+        SELECT: {
+          from: { ref: ['cap_e2e.Authors'] },
+          where: [
+            'NOT',
+            { ref: ['ID'] },
+            'in',
+            {
+              SELECT: {
+                from: { ref: ['cap_e2e.Orders'] },
+                columns: [{ ref: ['book_ID'] }],
+              },
+            },
+          ],
+        },
+      };
+
+      const { sql } = cqnToSQL(cqn, credentials);
+      expect(sql).to.include('NOT');
+      expect(sql).to.include('IN (');
+    });
+  });
 });

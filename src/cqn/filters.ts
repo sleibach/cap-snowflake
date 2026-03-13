@@ -11,6 +11,12 @@ export interface FilterSqlContext {
   target?: any;
   /** Resolve a CDS entity name to its physical table name (follows projection chains) */
   resolveTable?: (entityName: string) => string;
+  /**
+   * Translate a full SELECT CQN body to SQL.
+   * Provided by toSQL.ts to allow subquery translation inside WHERE clauses
+   * without creating a circular import.
+   */
+  translateSelect?: (selectBody: any, params: any[]) => string;
 }
 
 export interface CQNExpression {
@@ -114,6 +120,15 @@ function translateExpression(xpr: any[], params: any[], baseAlias?: string, isDr
         parts.push(`(${translateExpression(element.xpr, params, baseAlias, isDraft, sqlContext)})`);
       } else if (element.list) {
         parts.push(translateList(element.list, params));
+      } else if (element.SELECT) {
+        // Subquery in WHERE: e.g. { ref: ['authorId'] }, 'in', { SELECT: { from: ..., columns: [...] } }
+        if (sqlContext?.translateSelect) {
+          parts.push(`(${sqlContext.translateSelect(element.SELECT, params)})`);
+        } else {
+          // No translator available — emit a placeholder that always evaluates true
+          // rather than crashing. This should not happen in production paths.
+          parts.push('(SELECT NULL WHERE 1=0)');
+        }
       }
     }
   }

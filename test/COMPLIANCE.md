@@ -16,7 +16,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 3 | SELECT | $filter contains/startswith/endswith | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 4 | SELECT | $filter AND/OR/NOT | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + e2e | ✅ |
 | 5 | SELECT | $filter on navigation property (author/name eq 'X') | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 6 | SELECT | $filter with subqueries | compliance/SELECT.test.js | — | ❌ missing |
+| 6 | SELECT | $filter with subqueries | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + test/unit/cqn-toSQL.test.ts | ✅ |
 | 7 | SELECT | $orderby single/multi/asc/desc | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 8 | SELECT | $top, $skip, $count | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 9 | SELECT | $select (column projection) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
@@ -71,7 +71,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 54 | Deploy | Initial deploy from CDS model | — | test/unit/deploy.test.ts | ✅ |
 | 55 | Deploy | Schema evolution: ADD COLUMN | — | test/unit/deploy.test.ts | ✅ |
 | 56 | Deploy | Re-deploy idempotency | — | test/unit/deploy.test.ts | ✅ |
-| 57 | Deploy | CSV initial data load (db/data/) | compliance/CREATE.test.js | — | ❌ missing |
+| 57 | Deploy | CSV initial data load (db/data/) | compliance/CREATE.test.js | test/unit/csv.test.ts + test/integ/csv-deploy.test.ts | ✅ |
 | 58 | Deploy | CDS type → Snowflake DDL mapping (all types) | — | test/unit/types.test.ts | ✅ |
 | 59 | Deploy | DROP COLUMN (schema evolution, backwards) | — | — | 🚫 not implemented (add-only policy) |
 | **MANAGED / SPECIAL ASPECTS** |||||
@@ -106,7 +106,6 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 
 | # | Item | Notes |
 |---|------|-------|
-| 57 | CSV data load | `cds deploy --with-mocks` data seeding |
 | 62 | Managed within transaction | Transaction isolation test |
 | 65 | Temporal UPSERT | Time-slice insert |
 | 72 | Non-existent entity ops | 404 on update/delete of missing entity (CAP/Snowflake does not currently enforce this) |
@@ -115,6 +114,8 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 
 | # | Item | Verdict |
 |---|------|---------|
+| 6 | $filter with subqueries | ✅ `{ SELECT: {...} }` in WHERE translated via `translateSelect` callback in `FilterSqlContext`; params shared correctly |
+| 57 | CSV data load | ✅ `loadCsvData()` in `src/ddl/csv.ts` uses `cds.deploy.prepare()` (respects `cds.requires.db.data` config); MERGE UPSERT; integrated into deployer; 10 unit tests |
 | 5 | $filter on nav property | ✅ `author/name eq 'X'` works via cqn4sql JOIN expansion |
 | 18 | $apply filter transformations | ✅ `$apply=filter(price gt 30)` and `filter/aggregate` work |
 | 19 | tolower/toupper/length | ✅ Mapped to LOWER/UPPER/LENGTH in translateFunc |

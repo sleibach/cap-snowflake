@@ -192,7 +192,15 @@ function translateSelect(
       : undefined;
   const effectiveWhere = (select.where && select.where.length > 0) ? select.where : inlineFromWhere;
   if (effectiveWhere && effectiveWhere.length > 0) {
-    const filterCtx: FilterSqlContext = { credentials, target: context?.target, resolveTable: resolveEntityName };
+    const filterCtx: FilterSqlContext = {
+      credentials,
+      target: context?.target,
+      resolveTable: resolveEntityName,
+      // Enable subquery translation inside WHERE: { SELECT: {...} } → (SELECT ...)
+      // IMPORTANT: pass the outer params array so subquery bindings are appended inline.
+      translateSelect: (selectBody: any, outerParams: any[]) =>
+        translateSelect(selectBody, credentials, outerParams, context).sql,
+    };
     const whereClause = translateFilter(effectiveWhere, params, filterAlias, isDraftQuery, filterCtx);
     if (whereClause) {
       sql += ` WHERE ${whereClause}`;
