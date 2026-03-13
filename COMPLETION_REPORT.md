@@ -237,7 +237,7 @@ All planned features have been fully implemented. The adapter now provides compl
 ## Next Steps
 
 ### For Users
-1. Install: `npm install cap-snowflake`
+1. Install: `npm install github:sleibach/cap-snowflake`
 2. Configure credentials
 3. Import schema (optional): `npx cap-snowflake-import`
 4. Define services

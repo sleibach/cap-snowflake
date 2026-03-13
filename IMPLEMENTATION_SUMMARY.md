@@ -339,7 +339,7 @@ Maintains a clean separation of concerns with testable, extensible components.
 
 ### 1. Install
 ```bash
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 ```
 
 ### 2. Configure

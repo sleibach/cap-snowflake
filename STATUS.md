@@ -141,7 +141,7 @@ entity WorkAssignments : temporal { ... }
 
 ### Quick Start
 ```bash
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 npx cap-snowflake-import  # Import existing schema
 cds serve
 ```

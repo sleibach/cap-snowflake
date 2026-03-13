@@ -216,7 +216,7 @@ cap-snowflake/
 cds init my-project
 
 # 2. Install adapter
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 
 # 3. Configure (package.json)
 # See QUICKSTART.md
@@ -231,7 +231,7 @@ cds serve
 ### Use Case 2: Existing Snowflake Database
 ```bash
 # 1. Install adapter
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 
 # 2. Import schema
 npx cap-snowflake-import --schema=PROD_SCHEMA
@@ -249,7 +249,7 @@ cds serve
 ### Use Case 3: Migration from Another Adapter
 ```bash
 # 1. Install cap-snowflake
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 
 # 2. Update configuration
 # Change "kind": "postgres" → "snowflake"

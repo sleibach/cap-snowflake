@@ -219,7 +219,7 @@ Root Documentation:
 
 ### Installation
 ```bash
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 ```
 
 ### Configuration
@@ -328,7 +328,7 @@ cds serve
 
 ### Code
 - **GitHub**: (to be published)
-- **NPM**: `npm install cap-snowflake`
+- **NPM**: `npm install github:sleibach/cap-snowflake`
 
 ### Community
 - Issues & discussions on GitHub
@@ -394,7 +394,7 @@ npm test
 npm publish
 
 # Use
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 npx cap-snowflake-import
 cds serve
 ```
@@ -457,7 +457,7 @@ cds serve
 
 ### 1. Install and Use
 ```bash
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 ```
 
 ### 2. Import Existing Database

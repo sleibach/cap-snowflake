@@ -5,7 +5,7 @@ Get started with cap-snowflake in 5 minutes!
 ## Installation
 
 ```bash
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 ```
 
 ## Minimal Configuration

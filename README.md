@@ -35,7 +35,7 @@ SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Ap
 ## Installation
 
 ```bash
-npm install cap-snowflake
+npm install github:sleibach/cap-snowflake
 ```
 
 ---
