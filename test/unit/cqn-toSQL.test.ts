@@ -737,6 +737,191 @@ describe('Star schema — dimension navigation in groupBy', () => {
 });
 
 // ---------------------------------------------------------------------------
+// OData $apply aggregate translation
+// CAP compiles $apply=groupby((...),aggregate(...)) into CQN with func names
+// like "countdistinct", "sum", "avg", etc. — these must map to valid Snowflake SQL.
+// ---------------------------------------------------------------------------
+describe('$apply aggregate translation', () => {
+  const credentials: import('../../src/config.js').SnowflakeCredentials = {
+    account: 'TEST', user: 'TEST_USER', database: 'TEST_DB', schema: 'TEST_SCHEMA',
+    auth: 'jwt', jwt: { privateKey: 'dummy' },
+  };
+
+  // -- countdistinct ----------------------------------------------------------
+
+  it('countdistinct → COUNT(DISTINCT col)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['MaterialValuation'] },
+        columns: [
+          { func: 'countdistinct', args: [{ ref: ['material_id'] }], as: 'material_id_countdistinct' },
+        ],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('COUNT(DISTINCT MATERIAL_ID)');
+    expect(sql).to.include('"material_id_countdistinct"');
+    expect(sql).not.to.include('COUNTDISTINCT');
+  });
+
+  it('countdistinct with groupBy — real-world $apply scenario from bug report', () => {
+    // Reproduces: $apply=groupby((kategorie),aggregate(material_id with countdistinct as material_id_countdistinct))
+    const cqn = {
+      SELECT: {
+        from: { ref: ['PHARMA_MATERIAL_VALUATION'] },
+        columns: [
+          { ref: ['kategorie'] },
+          { func: 'countdistinct', args: [{ ref: ['material_id'] }], as: 'material_id_countdistinct' },
+        ],
+        groupBy: [{ ref: ['kategorie'] }],
+      },
+    };
+    const { sql, params } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('COUNT(DISTINCT MATERIAL_ID)');
+    expect(sql).to.include('"material_id_countdistinct"');
+    expect(sql).to.include('GROUP BY KATEGORIE');
+    expect(sql).not.to.include('COUNTDISTINCT');
+    expect(params).to.deep.equal([]);
+  });
+
+  it('countdistinct is case-insensitive (CAP may lowercase or camelCase)', () => {
+    // CAP emits lowercase "countdistinct" — ensure our toUpperCase() + special-case handles it
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Orders'] },
+        columns: [
+          { func: 'countdistinct', args: [{ ref: ['customer_id'] }], as: 'unique_customers' },
+        ],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.match(/COUNT\(DISTINCT CUSTOMER_ID\)/);
+    expect(sql).not.to.include('COUNTDISTINCT');
+  });
+
+  // -- standard aggregates (must still work correctly) -----------------------
+
+  it('count with no args → COUNT(*)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Orders'] },
+        columns: [{ func: 'count', as: 'total' }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('COUNT(*)');
+    expect(sql).to.include('"total"');
+  });
+
+  it('count with explicit * arg → COUNT(*)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Orders'] },
+        columns: [{ func: 'count', args: [{ val: '*' }], as: 'total' }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('COUNT(');
+    expect(sql).to.include('"total"');
+  });
+
+  it('sum → SUM(col)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Sales'] },
+        columns: [{ func: 'sum', args: [{ ref: ['amount'] }], as: 'total_amount' }],
+        groupBy: [{ ref: ['region'] }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('SUM(AMOUNT)');
+    expect(sql).to.include('"total_amount"');
+    expect(sql).to.include('GROUP BY REGION');
+  });
+
+  it('avg → AVG(col)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Sales'] },
+        columns: [{ func: 'avg', args: [{ ref: ['price'] }], as: 'avg_price' }],
+        groupBy: [{ ref: ['category'] }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('AVG(PRICE)');
+    expect(sql).to.include('"avg_price"');
+  });
+
+  it('min → MIN(col)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Sales'] },
+        columns: [{ func: 'min', args: [{ ref: ['price'] }], as: 'min_price' }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('MIN(PRICE)');
+    expect(sql).to.include('"min_price"');
+  });
+
+  it('max → MAX(col)', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Sales'] },
+        columns: [{ func: 'max', args: [{ ref: ['price'] }], as: 'max_price' }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('MAX(PRICE)');
+    expect(sql).to.include('"max_price"');
+  });
+
+  // -- multi-aggregate $apply ------------------------------------------------
+
+  it('multiple aggregates with groupBy in one query', () => {
+    // $apply=groupby((category),aggregate(price with sum as total_price, id with countdistinct as unique_count))
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Products'] },
+        columns: [
+          { ref: ['category'] },
+          { func: 'sum', args: [{ ref: ['price'] }], as: 'total_price' },
+          { func: 'countdistinct', args: [{ ref: ['id'] }], as: 'unique_count' },
+          { func: 'avg', args: [{ ref: ['price'] }], as: 'avg_price' },
+        ],
+        groupBy: [{ ref: ['category'] }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('SUM(PRICE)');
+    expect(sql).to.include('COUNT(DISTINCT ID)');
+    expect(sql).to.include('AVG(PRICE)');
+    expect(sql).to.include('GROUP BY CATEGORY');
+    expect(sql).not.to.include('COUNTDISTINCT');
+  });
+
+  it('$apply with groupBy on multiple dimensions', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['Sales'] },
+        columns: [
+          { ref: ['region'] },
+          { ref: ['year'] },
+          { func: 'countdistinct', args: [{ ref: ['customer_id'] }], as: 'unique_customers' },
+          { func: 'sum', args: [{ ref: ['revenue'] }], as: 'total_revenue' },
+        ],
+        groupBy: [{ ref: ['region'] }, { ref: ['year'] }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('COUNT(DISTINCT CUSTOMER_ID)');
+    expect(sql).to.include('SUM(REVENUE)');
+    expect(sql).to.include('GROUP BY REGION, YEAR');
+    expect(sql).not.to.include('COUNTDISTINCT');
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('Large IN list — 1000+ parameters', () => {
   const credentials: import('../../src/config.js').SnowflakeCredentials = {
     account: 'TEST', user: 'TEST_USER', database: 'TEST_DB', schema: 'TEST_SCHEMA',

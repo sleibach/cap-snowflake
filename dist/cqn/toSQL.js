@@ -741,6 +741,10 @@ function translateColumnFunc(col) {
                 return arg.val === null ? 'NULL' : String(arg.val);
             return '*';
         }).join(', ');
+        // CAP emits "countdistinct" for $apply aggregate — Snowflake needs COUNT(DISTINCT ...)
+        if (funcName === 'COUNTDISTINCT') {
+            return `COUNT(DISTINCT ${args})`;
+        }
         return `${funcName}(${args})`;
     }
     return `${funcName}()`;
