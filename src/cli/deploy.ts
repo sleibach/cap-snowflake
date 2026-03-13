@@ -8,7 +8,7 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import cds from '@sap/cds';
 import { buildDeployStatements, generateMigrationStatements } from '../ddl/deploy.js';
 import { SnowflakeSQLAPIClient } from '../client/sqlapi.js';
