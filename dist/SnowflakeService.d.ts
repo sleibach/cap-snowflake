@@ -86,15 +86,25 @@ export declare class SnowflakeService extends cds.DatabaseService {
     private execute;
     private executeStream;
     /**
-     * Begin transaction
+     * Begin transaction.
+     *
+     * SQL API mode: the HTTP API is stateless — every statement auto-commits and
+     * explicit transaction control commands (BEGIN TRANSACTION etc.) are rejected
+     * with error 391911. CAP still calls begin()/commit()/rollback() around every
+     * request, so we track the state flag but send no SQL over the wire.
+     *
+     * SDK mode: delegates to the native driver's transaction support.
      */
     begin(): Promise<void>;
     /**
-     * Commit transaction
+     * Commit transaction.
+     * SQL API mode: no-op (see begin()).
      */
     commit(): Promise<void>;
     /**
-     * Rollback transaction
+     * Rollback transaction.
+     * SQL API mode: no-op (see begin()). CAP may call this on error paths;
+     * individual statements have already auto-committed, so this is best-effort.
      */
     rollback(): Promise<void>;
     /**

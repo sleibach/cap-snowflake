@@ -649,22 +649,28 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
-   * Begin transaction
+   * Begin transaction.
+   *
+   * SQL API mode: the HTTP API is stateless — every statement auto-commits and
+   * explicit transaction control commands (BEGIN TRANSACTION etc.) are rejected
+   * with error 391911. CAP still calls begin()/commit()/rollback() around every
+   * request, so we track the state flag but send no SQL over the wire.
+   *
+   * SDK mode: delegates to the native driver's transaction support.
    */
   async begin(): Promise<void> {
     if (this.inTransaction) {
-      logWarning('Transaction already in progress');
+      logDebug('transaction already in progress, begin() is a no-op', { contextId: cds.context?.id ?? 'default' });
       return;
     }
 
     try {
       if (this.sdkClient) {
         await this.sdkClient.beginTransaction();
-      } else if (this.sqlApiClient) {
-        await this.sqlApiClient.execute('BEGIN TRANSACTION');
       }
+      // SQL API: intentional no-op — stateless HTTP requests auto-commit
       this.inTransaction = true;
-      logDebug('transaction started', { contextId: cds.context?.id ?? 'default' });
+      logDebug('transaction started', { mode: this.sdkClient ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
     } catch (error) {
       logError('Failed to begin transaction', error);
       throw normalizeError(error);
@@ -672,7 +678,8 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
-   * Commit transaction
+   * Commit transaction.
+   * SQL API mode: no-op (see begin()).
    */
   async commit(): Promise<void> {
     if (!this.inTransaction) {
@@ -682,11 +689,10 @@ export class SnowflakeService extends cds.DatabaseService {
     try {
       if (this.sdkClient) {
         await this.sdkClient.commit();
-      } else if (this.sqlApiClient) {
-        await this.sqlApiClient.execute('COMMIT');
       }
+      // SQL API: intentional no-op
       this.inTransaction = false;
-      logDebug('transaction committed', { contextId: cds.context?.id ?? 'default' });
+      logDebug('transaction committed', { mode: this.sdkClient ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
     } catch (error) {
       logError('Failed to commit transaction', error);
       throw normalizeError(error);
@@ -694,7 +700,9 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
-   * Rollback transaction
+   * Rollback transaction.
+   * SQL API mode: no-op (see begin()). CAP may call this on error paths;
+   * individual statements have already auto-committed, so this is best-effort.
    */
   async rollback(): Promise<void> {
     if (!this.inTransaction) {
@@ -704,11 +712,10 @@ export class SnowflakeService extends cds.DatabaseService {
     try {
       if (this.sdkClient) {
         await this.sdkClient.rollback();
-      } else if (this.sqlApiClient) {
-        await this.sqlApiClient.execute('ROLLBACK');
       }
+      // SQL API: intentional no-op
       this.inTransaction = false;
-      logDebug('transaction rolled back', { contextId: cds.context?.id ?? 'default' });
+      logDebug('transaction rolled back', { mode: this.sdkClient ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
     } catch (error) {
       logError('Failed to rollback transaction', error);
       throw normalizeError(error);
