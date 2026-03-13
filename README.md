@@ -1,9 +1,13 @@
 # cap-snowflake
 
-SAP CAP database adapter for Snowflake — production-grade OData V4 support for the SAP Cloud Application Programming Model.
+SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Application Programming Model.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
+
+> **Early Development Notice**
+>
+> This adapter is in active development and has not yet reached a stable release. Public APIs, configuration options, and internal behaviour may change between versions without prior notice. It is not recommended for production use without thorough evaluation in your specific environment. Feedback, bug reports, and contributions are welcome via GitHub Issues.
 
 ---
 
