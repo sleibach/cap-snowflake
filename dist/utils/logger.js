@@ -25,7 +25,13 @@ export function logSQL(sql, params, timing) {
     }
 }
 export function logWarning(message, details) {
-    LOG.warn(message, scrubCredentials(details));
+    const scrubbed = scrubCredentials(details);
+    if (scrubbed !== undefined) {
+        LOG.warn(message, scrubbed);
+    }
+    else {
+        LOG.warn(message);
+    }
 }
 export function logError(message, error) {
     LOG.error(message, scrubCredentials(error));

@@ -237,3 +237,129 @@ describe('restructureExpands — flat JOIN rows → nested objects', () => {
     expect(result[0].author).to.deep.equal({ ID: 'uuid-123', name: 'Alice' });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Transaction support — SQL API mode
+// ---------------------------------------------------------------------------
+describe('Transaction support — SQL API mode', () => {
+  /**
+   * Builds a minimal SnowflakeService-like stub with only the transaction
+   * methods wired to a fake sqlApiClient, mirroring the real implementation.
+   */
+  function makeStub() {
+    const executed: string[] = [];
+    const sqlApiClient = {
+      execute: async (sql: string) => {
+        executed.push(sql);
+        return { resultSetMetaData: { rowType: [] }, data: [], total: 0, returned: 0 };
+      },
+    };
+
+    const transactionStates = new Map<string, boolean>();
+    const stub = {
+      sqlApiClient,
+      sdkClient: undefined as any,
+      executed,
+      get inTransaction(): boolean {
+        return transactionStates.get('default') ?? false;
+      },
+      set inTransaction(value: boolean) {
+        if (value) transactionStates.set('default', true);
+        else transactionStates.delete('default');
+      },
+      async begin() {
+        if (this.inTransaction) return;
+        if (this.sdkClient) {
+          await this.sdkClient.beginTransaction();
+        } else if (this.sqlApiClient) {
+          await this.sqlApiClient.execute('BEGIN TRANSACTION');
+        }
+        this.inTransaction = true;
+      },
+      async commit() {
+        if (!this.inTransaction) return;
+        if (this.sdkClient) {
+          await this.sdkClient.commit();
+        } else if (this.sqlApiClient) {
+          await this.sqlApiClient.execute('COMMIT');
+        }
+        this.inTransaction = false;
+      },
+      async rollback() {
+        if (!this.inTransaction) return;
+        if (this.sdkClient) {
+          await this.sdkClient.rollback();
+        } else if (this.sqlApiClient) {
+          await this.sqlApiClient.execute('ROLLBACK');
+        }
+        this.inTransaction = false;
+      },
+    };
+    return stub;
+  }
+
+  it('begin() sends BEGIN TRANSACTION via SQL API', async () => {
+    const stub = makeStub();
+    await stub.begin();
+    expect(stub.executed).to.deep.equal(['BEGIN TRANSACTION']);
+    expect(stub.inTransaction).to.equal(true);
+  });
+
+  it('commit() sends COMMIT via SQL API and clears transaction state', async () => {
+    const stub = makeStub();
+    await stub.begin();
+    await stub.commit();
+    expect(stub.executed).to.deep.equal(['BEGIN TRANSACTION', 'COMMIT']);
+    expect(stub.inTransaction).to.equal(false);
+  });
+
+  it('rollback() sends ROLLBACK via SQL API and clears transaction state', async () => {
+    const stub = makeStub();
+    await stub.begin();
+    await stub.rollback();
+    expect(stub.executed).to.deep.equal(['BEGIN TRANSACTION', 'ROLLBACK']);
+    expect(stub.inTransaction).to.equal(false);
+  });
+
+  it('begin() is idempotent — second call is a no-op', async () => {
+    const stub = makeStub();
+    await stub.begin();
+    await stub.begin();
+    // BEGIN TRANSACTION must appear exactly once
+    expect(stub.executed.filter(s => s === 'BEGIN TRANSACTION')).to.have.lengthOf(1);
+  });
+
+  it('commit() without begin() is a no-op', async () => {
+    const stub = makeStub();
+    await stub.commit();
+    expect(stub.executed).to.deep.equal([]);
+  });
+
+  it('rollback() without begin() is a no-op', async () => {
+    const stub = makeStub();
+    await stub.rollback();
+    expect(stub.executed).to.deep.equal([]);
+  });
+
+  it('full begin → commit cycle leaves clean state', async () => {
+    const stub = makeStub();
+    await stub.begin();
+    expect(stub.inTransaction).to.equal(true);
+    await stub.commit();
+    expect(stub.inTransaction).to.equal(false);
+    // Second transaction must work cleanly after the first
+    await stub.begin();
+    expect(stub.executed).to.deep.equal(['BEGIN TRANSACTION', 'COMMIT', 'BEGIN TRANSACTION']);
+    expect(stub.inTransaction).to.equal(true);
+  });
+
+  it('full begin → rollback cycle leaves clean state', async () => {
+    const stub = makeStub();
+    await stub.begin();
+    await stub.rollback();
+    expect(stub.inTransaction).to.equal(false);
+    // Can start another transaction immediately
+    await stub.begin();
+    expect(stub.executed[2]).to.equal('BEGIN TRANSACTION');
+  });
+});

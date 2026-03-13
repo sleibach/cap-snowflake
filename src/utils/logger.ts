@@ -29,7 +29,12 @@ export function logSQL(sql: string, params?: any[], timing?: number) {
 }
 
 export function logWarning(message: string, details?: any) {
-  LOG.warn(message, scrubCredentials(details));
+  const scrubbed = scrubCredentials(details);
+  if (scrubbed !== undefined) {
+    LOG.warn(message, scrubbed);
+  } else {
+    LOG.warn(message);
+  }
 }
 
 export function logError(message: string, error: any) {

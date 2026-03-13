@@ -639,12 +639,11 @@ export class SnowflakeService extends cds.DatabaseService {
     try {
       if (this.sdkClient) {
         await this.sdkClient.beginTransaction();
-        this.inTransaction = true;
-        logInfo('Transaction started');
-      } else {
-        // SQL API doesn't support explicit transactions in same way
-        logWarning('Transactions not fully supported in SQL API mode');
+      } else if (this.sqlApiClient) {
+        await this.sqlApiClient.execute('BEGIN TRANSACTION');
       }
+      this.inTransaction = true;
+      logInfo('Transaction started');
     } catch (error) {
       logError('Failed to begin transaction', error);
       throw normalizeError(error);
@@ -662,9 +661,11 @@ export class SnowflakeService extends cds.DatabaseService {
     try {
       if (this.sdkClient) {
         await this.sdkClient.commit();
-        this.inTransaction = false;
-        logInfo('Transaction committed');
+      } else if (this.sqlApiClient) {
+        await this.sqlApiClient.execute('COMMIT');
       }
+      this.inTransaction = false;
+      logInfo('Transaction committed');
     } catch (error) {
       logError('Failed to commit transaction', error);
       throw normalizeError(error);
@@ -682,9 +683,11 @@ export class SnowflakeService extends cds.DatabaseService {
     try {
       if (this.sdkClient) {
         await this.sdkClient.rollback();
-        this.inTransaction = false;
-        logInfo('Transaction rolled back');
+      } else if (this.sqlApiClient) {
+        await this.sqlApiClient.execute('ROLLBACK');
       }
+      this.inTransaction = false;
+      logInfo('Transaction rolled back');
     } catch (error) {
       logError('Failed to rollback transaction', error);
       throw normalizeError(error);
