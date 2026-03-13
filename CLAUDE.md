@@ -182,8 +182,10 @@ describe('OData Draft', () => {
 
 For debugging SQL issues:
 ```bash
-DEBUG=sql npm test        # shows generated SQL
-DEBUG=* npm test          # full CDS debug output
+DEBUG=sql npm test                         # SQL statements + timings only
+DEBUG=snowflake-adapter npm test           # adapter internals (CQN, row counts, tx lifecycle)
+DEBUG=snowflake-adapter,sql npm test       # both
+DEBUG=* npm test                           # full CDS debug output
 ```
 
 ## Snowflake SQL Pitfalls

@@ -9,7 +9,7 @@ import { SnowflakeSDKClient } from './client/sdk.js';
 import { cqnToSQL, generateMerge, resolveEntityName } from './cqn/toSQL.js';
 import { qualifyName, toPhysicalIdentifier } from './identifiers.js';
 import { wrapWithCount, stripPagination } from './cqn/pagination.js';
-import { logInfo, logError, logWarning } from './utils/logger.js';
+import { logInfo, logError, logWarning, logDebug } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
 import { buildDeployStatements } from './ddl/deploy.js';
 import { isTemporal, getTemporalFields } from './features/temporal.js';
@@ -109,6 +109,7 @@ export class SnowflakeService extends cds.DatabaseService {
             if (!select) {
                 throw new Error('Invalid SELECT query');
             }
+            logDebug('READ', () => ({ entity: req.entity, query: query.SELECT }));
             // Check if $count is requested
             const needsCount = select.count;
             // Apply cqn4sql to convert navigation property references in WHERE clauses
@@ -120,10 +121,12 @@ export class SnowflakeService extends cds.DatabaseService {
             if (hasNavFilter && this.model) {
                 try {
                     transformedQuery = getCqn4sql()(query, this.model);
+                    logDebug('cqn4sql applied (navigation property filter detected)');
                 }
                 catch {
                     // If cqn4sql fails (e.g. for raw queries), fall back to the original query
                     transformedQuery = query;
+                    logDebug('cqn4sql skipped (transform failed, using original query)');
                 }
             }
             // Temporal entity: inject point-in-time WHERE conditions if CAP has not done so.
@@ -149,6 +152,10 @@ export class SnowflakeService extends cds.DatabaseService {
                         sel.where = sel.where?.length
                             ? [...sel.where, 'and', ...temporalFilter]
                             : temporalFilter;
+                        logDebug('temporal filter injected', { ts, fields: temporalFields });
+                    }
+                    else {
+                        logDebug('temporal filter already present, skipped');
                     }
                 }
             }
@@ -157,11 +164,15 @@ export class SnowflakeService extends cds.DatabaseService {
             // Snowflake Time Travel: inject AT clause when sap-snowflake-at header is present
             const timeTravelAt = parseTimeTravelHeader(req.headers ?? {});
             const sql = timeTravelAt ? injectTimeTravelClause(initialSql, timeTravelAt) : initialSql;
+            if (timeTravelAt)
+                logDebug('time travel AT clause injected', { at: timeTravelAt });
             if (this.shouldStreamRead(req, select)) {
+                logDebug('streaming read');
                 return this.executeStream(sql, params, req?.data?.batchSize);
             }
             // Execute query
             let rows = await this.execute(sql, params);
+            logDebug(`READ returned ${rows.length} row${rows.length !== 1 ? 's' : ''}`);
             rows = this.mapRowKeysToElements(rows, req.target);
             // Restructure expanded results if needed
             rows = this.restructureExpands(rows, select);
@@ -173,6 +184,7 @@ export class SnowflakeService extends cds.DatabaseService {
                 const countSQL = wrapWithCount(stripPagination(sql));
                 const countResult = await this.execute(countSQL, params);
                 const count = Number(countResult[0]?.count ?? countResult[0]?.COUNT ?? 0);
+                logDebug(`$count result: ${count}`);
                 // Attach $count to result set
                 rows.$count = count;
                 // Add @odata.nextLink when more pages exist
@@ -342,6 +354,7 @@ export class SnowflakeService extends cds.DatabaseService {
             if (!insert) {
                 throw new Error('Invalid INSERT query');
             }
+            logDebug('INSERT', () => ({ entity: req.entity, entries: insert.entries?.length ?? 1 }));
             // For draft entities, ensure IsActiveEntity=false is included in the data
             // BEFORE generating SQL — otherwise Snowflake stores it as NULL and draft
             // filter queries (IsActiveEntity eq false) return no results.
@@ -383,11 +396,13 @@ export class SnowflakeService extends cds.DatabaseService {
             if (!update) {
                 throw new Error('Invalid UPDATE query');
             }
+            logDebug('UPDATE', () => ({ entity: req.entity }));
             // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
             // Note: CAP runtime updates managed fields (modifiedAt, modifiedBy) automatically
             const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
             const result = await this.execute(sql, params);
             const rowCount = extractDMLRowCount(result);
+            logDebug(`UPDATE affected ${rowCount} row${rowCount !== 1 ? 's' : ''}`);
             // Return 404 when a keyed UPDATE finds no matching row (e.g. PATCH on non-existent entity).
             // Skip this check for internal CAP draft/system entities which may legitimately update 0 rows.
             const entityName = req.entity ?? '';
@@ -412,6 +427,7 @@ export class SnowflakeService extends cds.DatabaseService {
             if (!del) {
                 throw new Error('Invalid DELETE query');
             }
+            logDebug('DELETE', () => ({ entity: req.entity }));
             const target = req.target;
             const compositions = target?.compositions ?? {};
             // Cascade delete: delete child composition rows BEFORE the parent.
@@ -471,6 +487,7 @@ export class SnowflakeService extends cds.DatabaseService {
             const { sql, params } = cqnToSQL(query, this.credentials, { target });
             const result = await this.execute(sql, params);
             const rowCount = extractDMLRowCount(result);
+            logDebug(`DELETE affected ${rowCount} row${rowCount !== 1 ? 's' : ''}`);
             // Return 404 when a keyed DELETE finds no matching row.
             // Skip for internal CAP draft/system entities.
             const entityName = req.entity ?? '';
@@ -510,6 +527,7 @@ export class SnowflakeService extends cds.DatabaseService {
             const target = req.target;
             const keys = target?.keys ? Object.keys(target.keys) : ['ID'];
             const entries = upsert.entries ?? (upsert.entry ? [upsert.entry] : [req.data]);
+            logDebug('UPSERT', () => ({ entity: req.entity, entries: entries.length, keys }));
             for (const entry of entries) {
                 const { sql, params } = generateMerge(entity, keys, entry, this.credentials);
                 await this.execute(sql, params);
@@ -588,7 +606,7 @@ export class SnowflakeService extends cds.DatabaseService {
                 await this.sqlApiClient.execute('BEGIN TRANSACTION');
             }
             this.inTransaction = true;
-            logInfo('Transaction started');
+            logDebug('transaction started', { contextId: cds.context?.id ?? 'default' });
         }
         catch (error) {
             logError('Failed to begin transaction', error);
@@ -610,7 +628,7 @@ export class SnowflakeService extends cds.DatabaseService {
                 await this.sqlApiClient.execute('COMMIT');
             }
             this.inTransaction = false;
-            logInfo('Transaction committed');
+            logDebug('transaction committed', { contextId: cds.context?.id ?? 'default' });
         }
         catch (error) {
             logError('Failed to commit transaction', error);
@@ -632,7 +650,7 @@ export class SnowflakeService extends cds.DatabaseService {
                 await this.sqlApiClient.execute('ROLLBACK');
             }
             this.inTransaction = false;
-            logInfo('Transaction rolled back');
+            logDebug('transaction rolled back', { contextId: cds.context?.id ?? 'default' });
         }
         catch (error) {
             logError('Failed to rollback transaction', error);
