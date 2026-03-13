@@ -294,7 +294,8 @@ describe('CQN Filter Translation', () => {
     const xpr = [{ ref: ['deletedAt'] }, '=', { val: null }];
     const result = translateFilter(xpr, params);
 
-    expect(result).to.equal('DELETEDAT = NULL');
+    // = null is correctly translated to IS NULL (SQL standard for null comparison)
+    expect(result).to.equal('DELETEDAT IS NULL');
     expect(params).to.deep.equal([]);
   });
 
@@ -303,7 +304,8 @@ describe('CQN Filter Translation', () => {
     const xpr = [{ ref: ['author', 'name'] }, '=', { val: 'John' }];
     const result = translateFilter(xpr, params);
 
-    expect(result).to.equal('AUTHOR.NAME = ?');
+    // Multi-part ref: first part is the table alias (quoted to preserve case), second is column name (uppercase)
+    expect(result).to.equal('"author".NAME = ?');
     expect(params).to.deep.equal(['John']);
   });
 

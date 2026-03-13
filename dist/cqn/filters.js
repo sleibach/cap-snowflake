@@ -1,7 +1,7 @@
 /**
  * CQN filter/where clause translation to SQL
  */
-import { toPhysicalIdentifier, qualifyName } from '../identifiers.js';
+import { toPhysicalIdentifier, qualifyName, quoteIdentifier } from '../identifiers.js';
 import { placeholder } from '../params.js';
 /**
  * Translate CQN where/having expression to SQL
@@ -40,6 +40,17 @@ function translateExpression(xpr, params, baseAlias, isDraft, sqlContext) {
                 if (nextStr === 'EXISTS' && refEl?.ref?.length === 1 && typeof refEl.ref[0] === 'object' && refEl.ref[0].where) {
                     i += 2;
                     parts.push(`NOT ${buildExistsFromAssocRef(refEl.ref[0], params, baseAlias, sqlContext)}`);
+                    continue;
+                }
+            }
+            // Handle NULL comparison: `= null` → `IS NULL`, `!= null` / `<> null` → `IS NOT NULL`
+            // Must check next token (right side). We look ahead one element for a {val: null} object.
+            if ((opUpper === '=' || opUpper === '!=' || opUpper === '<>') && i + 1 < xpr.length) {
+                const nextEl = xpr[i + 1];
+                if (typeof nextEl === 'object' && nextEl !== null && 'val' in nextEl && nextEl.val === null) {
+                    i += 1; // consume the {val: null}
+                    const last = parts[parts.length - 1];
+                    parts[parts.length - 1] = (opUpper === '=') ? `${last} IS NULL` : `${last} IS NOT NULL`;
                     continue;
                 }
             }
@@ -159,7 +170,12 @@ function translateRef(ref, baseAlias, isDraft) {
     if (DRAFT_NAV_ENTITIES.has(firstStr.toLowerCase()))
         return 'NULL';
     // Multiple parts: table.column or alias.column
-    return ref.map(part => toPhysicalIdentifier(refPartToString(part))).join('.');
+    // The first part is a table alias (preserve case with quoteIdentifier),
+    // remaining parts are physical column names (uppercase with toPhysicalIdentifier).
+    return ref.map((part, i) => {
+        const str = refPartToString(part);
+        return i === 0 ? quoteIdentifier(str) : toPhysicalIdentifier(str);
+    }).join('.');
 }
 /**
  * Translate value
@@ -179,10 +195,14 @@ function translateFunc(func, params) {
     const funcName = func.func.toUpperCase();
     const args = func.args || [];
     switch (funcName) {
+        case 'TOLOWER':
         case 'LOWER':
+            return `LOWER(${translateExpression(args, params)})`;
+        case 'TOUPPER':
         case 'UPPER':
+            return `UPPER(${translateExpression(args, params)})`;
         case 'LENGTH':
-            return `${funcName}(${translateExpression(args, params)})`;
+            return `LENGTH(${translateExpression(args, params)})`;
         case 'SUBSTRING':
             // SUBSTRING(str, start, length)
             if (args.length >= 2) {
@@ -229,6 +249,11 @@ function translateFunc(func, params) {
                 }
             }
             break;
+        case 'ROUND':
+        case 'FLOOR':
+            return `${funcName}(${args.map(arg => translateExpression([arg], params)).join(', ')})`;
+        case 'CEILING':
+            return `CEIL(${args.map(arg => translateExpression([arg], params)).join(', ')})`;
         case 'YEAR':
         case 'MONTH':
         case 'DAY':

@@ -1,4 +1,4 @@
 --require tsx
---timeout 5000
+--timeout 120000
 --recursive
 

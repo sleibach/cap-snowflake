@@ -46,7 +46,9 @@ function translateSelect(select, credentials, params, context) {
             sql += ` ${cols}`;
             // FROM with joins
             let fromClause = translateFrom(select.from, credentials, context?.target, params);
-            if (!select.from.as) {
+            // Only append AS base alias when FROM is a plain table ref (not a JOIN-based FROM clause).
+            // JOIN-based FROM clauses already embed aliases from their args.
+            if (!select.from.as && !select.from.join) {
                 fromClause += ' AS base';
             }
             sql += ` FROM ${fromClause}`;
@@ -83,8 +85,11 @@ function translateSelect(select, credentials, params, context) {
         sql += ' *';
         sql += ` FROM ${translateFrom(select.from, credentials, context?.target, params)}`;
     }
-    // WHERE + $search — use base alias when JOINs are present to avoid ambiguity
-    const filterAlias = hasExpansions ? (select.from.as || 'base') : undefined;
+    // WHERE + $search — use base alias when JOINs are present to avoid ambiguity.
+    // When the FROM clause itself is a JOIN (navigation property filter), aliases come from
+    // the JOIN args, not a forced "base" alias — so leave filterAlias undefined in that case.
+    const hasJoinFrom = !!select.from.join;
+    const filterAlias = (hasExpansions && !hasJoinFrom) ? (select.from.as || 'base') : undefined;
     const isDraftQuery = isDraftTarget(context?.target, select.from);
     let hasWhere = false;
     // CAP embeds inline WHERE in the FROM ref for readAfterWrite (SELECT.one with keys):
@@ -411,14 +416,52 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
         const colName = col.ref[col.ref.length - 1];
         if (col.expand) {
             const nestedAssoc = colName;
-            const nestedAlias = nextAlias();
-            const nestedTarget = resolveAssociationTargetName(parentTarget, nestedAssoc)
+            const nestedTargetName = resolveAssociationTargetName(parentTarget, nestedAssoc)
                 || (nestedAssoc.charAt(0).toUpperCase() + nestedAssoc.slice(1));
-            const nestedTable = qualifyName(nestedTarget, credentials);
-            const nestedFK = resolveForeignKey(parentTarget, nestedAssoc);
-            const nestedTargetKey = resolveTargetKey(parentTarget, nestedAssoc);
-            joins.push(`LEFT JOIN ${nestedTable} AS ${nestedAlias} ON ${parentAlias}.${toPhysicalIdentifier(nestedFK)} = ${nestedAlias}.${toPhysicalIdentifier(nestedTargetKey)}`);
-            collectNestedExpandColumns(col.expand, `${pathPrefix}__${nestedAssoc}`, nestedAlias, joins, expandColumns, credentials, nextAlias, getDefinitionForEntity(nestedTarget), params);
+            const nestedTable = qualifyName(nestedTargetName, credentials);
+            const nestedTargetDef = getDefinitionForEntity(nestedTargetName);
+            if (isLikelyToMany(nestedAssoc, parentTarget)) {
+                // To-many nested expand: use ARRAY_AGG correlated subquery
+                const expandSpec = col.expand;
+                // Determine FK: parentTarget's PK is referenced by nestedTarget's FK
+                // For to-many: the child table has a FK pointing back to the parent.
+                // We need the FK name in the child table. Use heuristic: singularize(parentTarget name) + _ID
+                const parentEntityShortName = (parentTarget?.name ?? '').split('.').pop() ?? '';
+                const childFKCol = toPhysicalIdentifier(parentEntityShortName ? `${singularize(parentEntityShortName)}_ID` : 'ID');
+                // Build OBJECT_CONSTRUCT for the nested records
+                const isWildcard = !expandSpec || expandSpec.length === 0 || (expandSpec.length === 1 && expandSpec[0] === '*') || (expandSpec.length === 1 && expandSpec[0].ref?.[0] === '*');
+                let objConstruct;
+                if (!isWildcard && expandSpec.some(c => c.ref)) {
+                    const pairs = expandSpec
+                        .filter((c) => c.ref)
+                        .map((c) => {
+                        const cdsName = c.ref[0];
+                        return `'${cdsName}', ${toPhysicalIdentifier(cdsName)}`;
+                    })
+                        .join(', ');
+                    objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
+                }
+                else if (nestedTargetDef?.elements) {
+                    const pairs = Object.entries(nestedTargetDef.elements)
+                        .filter(([, el]) => !el.isAssociation && !el.virtual && el['@cds.persistence.skip'] !== true)
+                        .map(([elName]) => `'${elName}', ${toPhysicalIdentifier(elName)}`)
+                        .join(', ');
+                    objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
+                }
+                else {
+                    objConstruct = 'OBJECT_CONSTRUCT(*)';
+                }
+                const subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM ${nestedTable} AS tm WHERE tm.${childFKCol} = ${parentAlias}.ID`;
+                expandColumns.push(`(${subQuery}) AS ${quoteIdentifier(`${pathPrefix}__${nestedAssoc}`)}`);
+            }
+            else {
+                // To-one nested expand: use LEFT JOIN
+                const nestedAlias = nextAlias();
+                const nestedFK = resolveForeignKey(parentTarget, nestedAssoc);
+                const nestedTargetKey = resolveTargetKey(parentTarget, nestedAssoc);
+                joins.push(`LEFT JOIN ${nestedTable} AS ${nestedAlias} ON ${parentAlias}.${toPhysicalIdentifier(nestedFK)} = ${nestedAlias}.${toPhysicalIdentifier(nestedTargetKey)}`);
+                collectNestedExpandColumns(col.expand, `${pathPrefix}__${nestedAssoc}`, nestedAlias, joins, expandColumns, credentials, nextAlias, nestedTargetDef, params);
+            }
             continue;
         }
         const alias = `${pathPrefix}__${colName}`;
@@ -470,6 +513,19 @@ function singularize(name) {
  * Translate FROM clause
  */
 function translateFrom(from, credentials, target, params) {
+    // Handle JOIN-based FROM clause (generated by CAP for navigation property filters)
+    if (from.join) {
+        const joinType = from.join.toUpperCase();
+        const args = from.args;
+        if (args && args.length >= 2) {
+            const leftSQL = translateFrom(args[0], credentials, target, params);
+            const rightSQL = translateFrom(args[1], credentials, undefined, params);
+            const onClause = from.on
+                ? translateFilter(from.on, params || [], undefined, false)
+                : '1=1';
+            return `${leftSQL} ${joinType} JOIN ${rightSQL} ON ${onClause}`;
+        }
+    }
     if (from.ref) {
         // Locale-aware handling: when target entity has localized elements, inject dynamic locale join
         if (params && target) {

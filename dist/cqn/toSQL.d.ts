@@ -32,6 +32,7 @@ export interface FromClause {
     as?: string;
     join?: string;
     on?: any[];
+    args?: FromClause[];
 }
 export interface ColumnSpec {
     ref?: string[];

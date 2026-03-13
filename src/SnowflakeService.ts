@@ -16,6 +16,13 @@ import { buildDeployStatements } from './ddl/deploy.js';
 
 const _require = createRequire(import.meta.url);
 const { onDeep } = _require('@cap-js/db-service/lib/deep-queries');
+let _cqn4sql: ((q: any, model: any) => any) | undefined;
+function getCqn4sql(): (q: any, model: any) => any {
+  if (!_cqn4sql) {
+    _cqn4sql = _require('@cap-js/db-service/lib/cqn4sql');
+  }
+  return _cqn4sql!;
+}
 
 export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
@@ -115,8 +122,23 @@ export class SnowflakeService extends cds.DatabaseService {
       // Check if $count is requested
       const needsCount = select.count;
 
+      // Apply cqn4sql to convert navigation property references in WHERE clauses
+      // (e.g. author/name) to proper SQL JOINs, matching the behavior of HANA/SQLite adapters.
+      // Only apply when there are navigation property refs (multi-part, non-draft) in the WHERE
+      // to avoid changing the column structure for expand queries.
+      let transformedQuery = query;
+      const hasNavFilter = hasNavigationPropertyFilter(select);
+      if (hasNavFilter && this.model) {
+        try {
+          transformedQuery = getCqn4sql()(query, this.model);
+        } catch {
+          // If cqn4sql fails (e.g. for raw queries), fall back to the original query
+          transformedQuery = query;
+        }
+      }
+
       // Translate to SQL (now with JOIN-based expand support)
-      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
+      const { sql, params } = cqnToSQL(transformedQuery, this.credentials, { target: req.target });
 
       if (this.shouldStreamRead(req, select)) {
         return this.executeStream(sql, params, req?.data?.batchSize);
@@ -675,6 +697,26 @@ export class SnowflakeService extends cds.DatabaseService {
 
     logInfo('Deploy operation finished', { statements: statements.length });
   }
+}
+
+/**
+ * Detect whether a SELECT has navigation property references (multi-part refs like author/name)
+ * in its WHERE clause that require cqn4sql JOIN expansion.
+ */
+const DRAFT_NAV_LOWER = new Set(['siblingentity', 'draftadministrativedata', 'isactiveentity', 'hasactiveentity', 'hasdraftentity']);
+
+function hasNavigationPropertyFilter(select: any): boolean {
+  const where = select?.where;
+  if (!Array.isArray(where) || where.length === 0) return false;
+  return where.some(el => {
+    if (!el || typeof el !== 'object') return false;
+    if (el.ref && Array.isArray(el.ref) && el.ref.length > 1) {
+      const firstPart = typeof el.ref[0] === 'string' ? el.ref[0] : el.ref[0]?.id ?? el.ref[0]?.name ?? '';
+      if (DRAFT_NAV_LOWER.has(String(firstPart).toLowerCase())) return false;
+      return true; // multi-part ref that's not a draft entity → navigation filter
+    }
+    return false;
+  });
 }
 
 // Export as default

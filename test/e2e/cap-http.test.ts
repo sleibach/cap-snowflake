@@ -1004,4 +1004,170 @@ before(function () { this.timeout(120_000); });
       });
     });
   });
+
+  // ==========================================================================
+  describe('Navigation property filter', () => {
+    it('$filter=author/name eq John Doe returns only books by that author', async () => {
+      const res = await GET(`${BASE}/Books?$filter=author/name eq 'John Doe'`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      // BOOK_ID and BOOK_ID2 both belong to AUTHOR_ID (John Doe)
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+    });
+
+    it('$filter=author/country eq US returns books by US authors', async () => {
+      const res = await GET(`${BASE}/Books?$filter=author/country eq 'US'`);
+      expect(res.status).to.equal(200);
+      // Jane Smith (US) has no books in test data
+      expect(res.data.value).to.be.an('array').with.lengthOf(0);
+    });
+
+    it('$filter=author/country eq DE returns books by DE authors', async () => {
+      const res = await GET(`${BASE}/Books?$filter=author/country eq 'DE'`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+    });
+  });
+
+  // ==========================================================================
+  describe('OData functions in $filter', () => {
+    it('tolower(title) eq adapter patterns', async () => {
+      const res = await GET(`${BASE}/Books?$filter=tolower(title) eq 'adapter patterns'`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+
+    it('toupper(title) eq ADAPTER PATTERNS', async () => {
+      const res = await GET(`${BASE}/Books?$filter=toupper(title) eq 'ADAPTER PATTERNS'`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+
+    it('length(title) gt 5 returns all books (titles > 5 chars)', async () => {
+      const res = await GET(`${BASE}/Books?$filter=length(title) gt 5`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+    });
+
+    it('round(price) eq 30 returns book with price 29.99', async () => {
+      const res = await GET(`${BASE}/Books?$filter=round(price) eq 30`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+    });
+
+    it('floor(price) eq 29 returns book with price 29.99', async () => {
+      const res = await GET(`${BASE}/Books?$filter=floor(price) eq 29`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+
+    it('ceiling(price) eq 30 returns book with price 29.99', async () => {
+      const res = await GET(`${BASE}/Books?$filter=ceiling(price) eq 30`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+  });
+
+  // ==========================================================================
+  describe('Null handling in $filter', () => {
+    it('$filter=description eq null returns books with null description', async () => {
+      // Both seeded books have description set, so result should be empty
+      const res = await GET(`${BASE}/Books?$filter=description eq null`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+    });
+
+    it('$filter=description ne null returns books with non-null description', async () => {
+      const res = await GET(`${BASE}/Books?$filter=description ne null`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+
+    it('PATCH with null clears a field', async () => {
+      // Create an order with buyer set
+      const createRes = await POST(`${BASE}/Orders`, { book_ID: BOOK_ID, quantity: 1, buyer: 'to-be-cleared' });
+      expect(createRes.status).to.equal(201);
+      const orderId = createRes.data.ID;
+
+      // PATCH buyer to null
+      const patchRes = await PATCH(`${BASE}/Orders(${orderId})`, { buyer: null })
+        .catch((e: any) => e.response ?? e);
+      expect(patchRes.status).to.be.oneOf([200, 204]);
+
+      // Verify buyer is null
+      const getRes = await GET(`${BASE}/Orders(${orderId})`);
+      expect(getRes.data.buyer).to.be.oneOf([null, undefined, '']);
+
+      // Cleanup
+      await DELETE_REQ(`${BASE}/Orders(${orderId})`);
+    });
+  });
+
+  // ==========================================================================
+  describe('Multi-level $expand', () => {
+    it('$expand=author($expand=books) returns nested 2-level expand', async () => {
+      const res = await GET(`${BASE}/Books?$expand=author($expand=books)&$top=1`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf(1);
+      const book = res.data.value[0];
+      expect(book.author).to.be.an('object');
+      // author.books is the 2nd level expand
+      if (book.author) {
+        expect(book.author.books).to.be.an('array');
+      }
+    });
+  });
+
+  // ==========================================================================
+  describe('$apply filter transformations', () => {
+    it('$apply=filter(price gt 30) returns only expensive books', async () => {
+      const res = await GET(`${BASE}/Books?$apply=filter(price gt 30)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      for (const b of res.data.value) {
+        expect(Number(b.price)).to.be.greaterThan(30);
+      }
+      const resultIds = res.data.value.map((b: any) => b.ID);
+      expect(resultIds).to.include(BOOK_ID2); // 39.99
+      expect(resultIds).to.not.include(BOOK_ID); // 29.99
+    });
+
+    it('$apply=filter(stock gt 0)/aggregate(stock with sum as totalStock)', async () => {
+      const res = await GET(`${BASE}/Books?$apply=filter(stock gt 0)/aggregate(stock with sum as totalStock)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value[0].totalStock).to.be.a('number').and.greaterThan(0);
+    });
+  });
+
+  // ==========================================================================
+  describe('Non-existent entity operations', () => {
+    const NONEXISTENT_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+
+    it('GET /Orders(nonexistent) returns 404', async () => {
+      const res = await GET(`${BASE}/Orders(${NONEXISTENT_ID})`)
+        .catch((e: any) => e.response ?? e);
+      expect(res.status).to.equal(404);
+    });
+
+    it('PATCH /Orders(nonexistent) returns 404 or 204 (CAP does not enforce this)', async () => {
+      // Note: CAP/Snowflake does not currently enforce "not found" on PATCH — it silently
+      // succeeds with no rows updated. This test documents current behavior.
+      const res = await PATCH(`${BASE}/Orders(${NONEXISTENT_ID})`, { quantity: 99 })
+        .catch((e: any) => e.response ?? e);
+      expect(res.status).to.be.oneOf([200, 204, 404, 409]);
+    });
+
+    it('DELETE /Orders(nonexistent) returns 404 or 204 (CAP does not enforce this)', async () => {
+      // Note: CAP/Snowflake does not currently enforce "not found" on DELETE — it silently
+      // succeeds with no rows deleted. This test documents current behavior.
+      const res = await DELETE_REQ(`${BASE}/Orders(${NONEXISTENT_ID})`)
+        .catch((e: any) => e.response ?? e);
+      expect(res.status).to.be.oneOf([200, 204, 404]);
+    });
+  });
 });

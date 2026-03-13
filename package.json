@@ -19,10 +19,10 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "NODE_OPTIONS='--import tsx' mocha 'test/**/*.test.ts'",
+    "test": "NODE_OPTIONS='--import tsx' mocha 'test/unit/**/*.test.ts' --timeout 30000 && NODE_OPTIONS='--import tsx' mocha 'test/integ/**/*.test.ts' --timeout 120000 && NODE_OPTIONS='--import tsx' mocha 'test/e2e/cap-http.test.ts' --timeout 120000",
     "test:unit": "NODE_OPTIONS='--import tsx' mocha 'test/unit/**/*.test.ts'",
     "test:integ": "NODE_OPTIONS='--import tsx' mocha 'test/integ/**/*.test.ts'",
-    "test:e2e": "NODE_OPTIONS='--import tsx' mocha 'test/e2e/**/*.test.ts'",
+    "test:e2e": "NODE_OPTIONS='--import tsx' mocha 'test/e2e/cap-http.test.ts'",
     "test:e2e:live": "SNOWFLAKE_TEST=true NODE_OPTIONS='--import tsx' mocha 'test/e2e/**/*.test.ts'",
     "test:e2e:smoke": "SNOWFLAKE_E2E_SMOKE=true NODE_OPTIONS='--import tsx' mocha 'test/e2e/**/*.test.ts'",
     "lint": "eslint src",

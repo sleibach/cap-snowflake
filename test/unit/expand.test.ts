@@ -294,8 +294,8 @@ describe('Expand Support', () => {
 
       const result = cqnToSQL(cqn, credentials);
 
-      // Path expressions become qualified UPPERCASE references
-      expect(result.sql).to.include('AUTHOR.NAME');
+      // Path expressions: first part is quoted alias, second is uppercase column name
+      expect(result.sql).to.include('"author".NAME');
     });
 
     it('should handle path expressions in SELECT', () => {

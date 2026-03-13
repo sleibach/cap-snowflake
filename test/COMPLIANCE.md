@@ -15,7 +15,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 2 | SELECT | $filter eq/ne/lt/le/gt/ge | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 3 | SELECT | $filter contains/startswith/endswith | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 4 | SELECT | $filter AND/OR/NOT | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + e2e | ✅ |
-| 5 | SELECT | $filter on navigation property (author/name eq 'X') | compliance/SELECT.test.js | — | ❌ missing |
+| 5 | SELECT | $filter on navigation property (author/name eq 'X') | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 6 | SELECT | $filter with subqueries | compliance/SELECT.test.js | — | ❌ missing |
 | 7 | SELECT | $orderby single/multi/asc/desc | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 8 | SELECT | $top, $skip, $count | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
@@ -28,11 +28,11 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 15 | SELECT | Lambda: any() | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 16 | SELECT | Lambda: all() | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts | ✅ unit (all() is subset of any() path) |
 | 17 | SELECT | $apply groupby / aggregate (sum, avg, min, max, count) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 18 | SELECT | $apply filter transformations | compliance/SELECT.test.js | — | ❌ missing |
-| 19 | SELECT | OData functions: tolower, toupper, concat, length, indexof, substring, trim | compliance/functions.test.js | unit (partial) | ⚠️ partial |
+| 18 | SELECT | $apply filter transformations | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
+| 19 | SELECT | OData functions: tolower, toupper, concat, length, indexof, substring, trim | compliance/functions.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 20 | SELECT | OData functions: year, month, day, hour, minute, second | compliance/functions.test.js | unit (partial) | ⚠️ partial |
-| 21 | SELECT | OData functions: round, floor, ceiling | compliance/functions.test.js | — | ❌ missing |
-| 22 | SELECT | Null handling: eq null, ne null | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts | ✅ unit / ❌ e2e |
+| 21 | SELECT | OData functions: round, floor, ceiling | compliance/functions.test.js | test/e2e/cap-http.test.ts | ✅ |
+| 22 | SELECT | Null handling: eq null, ne null | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 23 | SELECT | Single-entity read (.one) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | **$EXPAND** |||||
 | 24 | Expand | $expand to-one (LEFT JOIN) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
@@ -42,7 +42,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 28 | Expand | $expand with $orderby | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 29 | Expand | $expand with $top / $skip | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 30 | Expand | $expand with $count | compliance/SELECT.test.js | — | ❌ missing |
-| 31 | Expand | $expand multi-level (3+ levels) | compliance/SELECT.test.js | test/unit/expand.test.ts | ✅ unit / ❌ e2e |
+| 31 | Expand | $expand multi-level (3+ levels) | compliance/SELECT.test.js | test/unit/expand.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 32 | Expand | Navigation properties (GET /Entity(key)/nav) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | **MUTATIONS** |||||
 | 33 | INSERT | Single entity | compliance/INSERT.test.js | test/e2e/cap-http.test.ts | ✅ |
@@ -53,7 +53,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 38 | UPDATE | Single field PATCH | compliance/UPDATE.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 39 | UPDATE | Managed fields auto-update (@cds.on.update) | managed.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 40 | UPDATE | Deep UPDATE (nested compositions) | compliance/UPDATE.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 41 | UPDATE | UPDATE nulling fields explicitly | compliance/UPDATE.test.js | — | ❌ missing |
+| 41 | UPDATE | UPDATE nulling fields explicitly | compliance/UPDATE.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 42 | DELETE | Single entity | compliance/DELETE.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 43 | DELETE | CASCADE on compositions | compliance/DELETE.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 44 | UPSERT | Basic UPSERT (PUT semantics) | compliance/UPSERT.test.js | test/integ/cqn-crud.test.ts | ✅ integ / ❌ e2e |
@@ -106,22 +106,25 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 
 | # | Item | Notes |
 |---|------|-------|
-| 5 | $filter on nav property | `author/name eq 'X'` — needs EXISTS subquery in filters.ts |
-| 18 | $apply filter transformations | CAP translates to CQN; may already work |
-| 21 | round/floor/ceiling functions | Add translateColumnFunc cases |
-| 41 | UPDATE nulling fields | PATCH with `null` values |
 | 57 | CSV data load | `cds deploy --with-mocks` data seeding |
 | 62 | Managed within transaction | Transaction isolation test |
 | 65 | Temporal UPSERT | Time-slice insert |
 | 71 | Strict mode validation | Missing field / wrong type |
-| 72 | Non-existent entity ops | 404 on update/delete of missing entity |
+| 72 | Non-existent entity ops | 404 on update/delete of missing entity (CAP/Snowflake does not currently enforce this) |
 
 ## Completed (this session)
 
 | # | Item | Verdict |
 |---|------|---------|
+| 5 | $filter on nav property | ✅ `author/name eq 'X'` works via cqn4sql JOIN expansion |
+| 18 | $apply filter transformations | ✅ `$apply=filter(price gt 30)` and `filter/aggregate` work |
+| 19 | tolower/toupper/length | ✅ Mapped to LOWER/UPPER/LENGTH in translateFunc |
+| 21 | round/floor/ceiling functions | ✅ ROUND/FLOOR/CEIL added to translateFunc |
+| 22 | Null handling e2e | ✅ `= null` → `IS NULL`, `!= null` → `IS NOT NULL` |
+| 31 | Multi-level $expand e2e | ✅ `$expand=author($expand=books)` to-many nested expand via ARRAY_AGG |
 | 35 | Deep INSERT (compositions) | ✅ POST /Catalogs with nested items works |
 | 40 | Deep UPDATE (compositions) | ✅ PATCH /CatalogItems updates child records |
+| 41 | UPDATE nulling fields | ✅ PATCH with null clears field (verified e2e) |
 | 43 | CASCADE DELETE (compositions) | ✅ DELETE /Catalogs deletes CatalogItems children |
 | 53 | Deep draft (composed entity) | ✅ Draft flow works for Catalogs+CatalogItems |
 | 70 | Constraint violation → 409 | 🚫 N/A — Snowflake constraints are informational only |

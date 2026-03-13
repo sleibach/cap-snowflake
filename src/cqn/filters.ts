@@ -2,7 +2,7 @@
  * CQN filter/where clause translation to SQL
  */
 
-import { toPhysicalIdentifier, qualifyName } from '../identifiers.js';
+import { toPhysicalIdentifier, qualifyName, quoteIdentifier } from '../identifiers.js';
 import { placeholder } from '../params.js';
 import { SnowflakeCredentials } from '../config.js';
 
@@ -65,6 +65,18 @@ function translateExpression(xpr: any[], params: any[], baseAlias?: string, isDr
         if (nextStr === 'EXISTS' && refEl?.ref?.length === 1 && typeof refEl.ref[0] === 'object' && refEl.ref[0].where) {
           i += 2;
           parts.push(`NOT ${buildExistsFromAssocRef(refEl.ref[0], params, baseAlias, sqlContext)}`);
+          continue;
+        }
+      }
+
+      // Handle NULL comparison: `= null` → `IS NULL`, `!= null` / `<> null` → `IS NOT NULL`
+      // Must check next token (right side). We look ahead one element for a {val: null} object.
+      if ((opUpper === '=' || opUpper === '!=' || opUpper === '<>') && i + 1 < xpr.length) {
+        const nextEl = xpr[i + 1];
+        if (typeof nextEl === 'object' && nextEl !== null && 'val' in nextEl && nextEl.val === null) {
+          i += 1; // consume the {val: null}
+          const last = parts[parts.length - 1];
+          parts[parts.length - 1] = (opUpper === '=') ? `${last} IS NULL` : `${last} IS NOT NULL`;
           continue;
         }
       }
@@ -185,7 +197,12 @@ function translateRef(ref: any[], baseAlias?: string, isDraft?: boolean): string
   if (DRAFT_NAV_ENTITIES.has(firstStr.toLowerCase())) return 'NULL';
 
   // Multiple parts: table.column or alias.column
-  return ref.map(part => toPhysicalIdentifier(refPartToString(part))).join('.');
+  // The first part is a table alias (preserve case with quoteIdentifier),
+  // remaining parts are physical column names (uppercase with toPhysicalIdentifier).
+  return ref.map((part, i) => {
+    const str = refPartToString(part);
+    return i === 0 ? quoteIdentifier(str) : toPhysicalIdentifier(str);
+  }).join('.');
 }
 
 /**
@@ -209,10 +226,14 @@ function translateFunc(func: CQNExpression, params: any[]): string {
   const args = func.args || [];
 
   switch (funcName) {
+    case 'TOLOWER':
     case 'LOWER':
+      return `LOWER(${translateExpression(args as any[], params)})`;
+    case 'TOUPPER':
     case 'UPPER':
+      return `UPPER(${translateExpression(args as any[], params)})`;
     case 'LENGTH':
-      return `${funcName}(${translateExpression(args as any[], params)})`;
+      return `LENGTH(${translateExpression(args as any[], params)})`;
     
     case 'SUBSTRING':
       // SUBSTRING(str, start, length)
@@ -264,11 +285,17 @@ function translateFunc(func: CQNExpression, params: any[]): string {
       }
       break;
     
+    case 'ROUND':
+    case 'FLOOR':
+      return `${funcName}(${args.map(arg => translateExpression([arg] as any[], params)).join(', ')})`;
+    case 'CEILING':
+      return `CEIL(${args.map(arg => translateExpression([arg] as any[], params)).join(', ')})`;
+
     case 'YEAR':
     case 'MONTH':
     case 'DAY':
       return `${funcName}(${translateExpression(args as any[], params)})`;
-    
+
     default:
       // Generic function call
       return `${funcName}(${args.map(arg => translateExpression([arg] as any[], params)).join(', ')})`;
