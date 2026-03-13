@@ -300,6 +300,21 @@ function translateFunc(func: CQNExpression, params: any[]): string {
       }
       break;
     
+    case 'CONCAT':
+      return `CONCAT(${args.map(arg => translateExpression([arg] as any[], params)).join(', ')})`;
+
+    case 'INDEXOF':
+      // OData indexof() is 0-based; Snowflake POSITION() is 1-based
+      if (args.length === 2) {
+        const str = translateExpression([args[0]] as any[], params);
+        const sub = translateExpression([args[1]] as any[], params);
+        return `(POSITION(${sub} IN ${str}) - 1)`;
+      }
+      break;
+
+    case 'TRIM':
+      return `TRIM(${translateExpression(args as any[], params)})`;
+
     case 'ROUND':
     case 'FLOOR':
       return `${funcName}(${args.map(arg => translateExpression([arg] as any[], params)).join(', ')})`;

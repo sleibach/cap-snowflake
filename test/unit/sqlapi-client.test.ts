@@ -133,3 +133,33 @@ describe('SnowflakeSQLAPIClient — retry delay calculation', () => {
     expect(delay).to.be.gte(1000).and.lte(1200);
   });
 });
+
+// ---------------------------------------------------------------------------
+describe('SnowflakeSQLAPIClient — retry exhaustion (Part E)', () => {
+  it('throws SnowflakeError after all retries are exhausted on 503', async () => {
+    const { SnowflakeError } = await import('../../src/utils/errors.js');
+    const creds: any = {
+      account: 'a', user: 'u', host: 'a.snowflakecomputing.com', auth: 'jwt',
+      jwt: { privateKey: 'k' }
+    };
+    const client = new SnowflakeSQLAPIClient(creds);
+    // Override maxRetries to 1 for speed
+    (client as any).maxRetries = 1;
+    // Stub sleep to avoid actual delay
+    (client as any).sleep = async () => {};
+    // Stub getAuthToken to return a dummy token
+    (client as any).getAuthToken = () => 'dummy-token';
+    // Stub makeRequest to always throw a 503 SnowflakeError
+    const retryableErr = new SnowflakeError('Service Unavailable', 'HTTP_503', undefined, 503);
+    (client as any).makeRequest = async () => { throw retryableErr; };
+
+    let thrown: any;
+    try {
+      await client.execute('SELECT 1');
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).to.be.instanceOf(SnowflakeError);
+    expect(thrown.statusCode).to.equal(503);
+  });
+});

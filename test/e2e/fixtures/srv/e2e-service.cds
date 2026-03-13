@@ -18,4 +18,5 @@ service E2ETestService {
 
   entity Catalogs     as projection on db.Catalogs;
   entity CatalogItems as projection on db.CatalogItems;
+  entity SalesFacts   as projection on db.SalesFacts;
 }

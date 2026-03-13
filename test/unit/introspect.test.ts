@@ -213,3 +213,61 @@ describe('Schema Introspection', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+describe('Star schema annotations (Part B5)', () => {
+  function makeTable(name: string, fkCount: number): TableMetadata {
+    const foreignKeys = Array.from({ length: fkCount }, (_, i) => ({
+      constraintName: `FK_${i}`,
+      columnName: `FK_${i}_ID`,
+      referencedTable: `DIM_TABLE_${i}`,
+      referencedColumn: 'ID',
+    }));
+    return {
+      info: { tableName: name, tableSchema: 'PUBLIC', tableType: 'BASE TABLE' },
+      columns: [{ columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true }],
+      primaryKeys: ['ID'],
+      foreignKeys,
+    } as TableMetadata;
+  }
+
+  it('entity with ≥ 3 FKs is annotated as FACT', () => {
+    const schema: SchemaDefinition = {
+      tables: new Map([
+        ['SALES_FACTS', makeTable('SALES_FACTS', 3)],
+        ['DIM_TABLE_0', makeTable('DIM_TABLE_0', 0)],
+        ['DIM_TABLE_1', makeTable('DIM_TABLE_1', 0)],
+        ['DIM_TABLE_2', makeTable('DIM_TABLE_2', 0)],
+      ]),
+    };
+    const model = generateCDSModel(schema, 'test');
+    expect(model).to.include('@Analytics.dataCategory: #FACT');
+    // The FACT annotation must appear before the SalesFacts entity
+    const factIdx = model.indexOf('@Analytics.dataCategory: #FACT');
+    const entityIdx = model.indexOf('entity SalesFacts');
+    expect(factIdx).to.be.lessThan(entityIdx);
+  });
+
+  it('entity with 0 FKs referenced by a FACT is annotated as DIMENSION', () => {
+    const schema: SchemaDefinition = {
+      tables: new Map([
+        ['ORDERS_FACT', makeTable('ORDERS_FACT', 3)],
+        ['DIM_TABLE_0', makeTable('DIM_TABLE_0', 0)],
+        ['DIM_TABLE_1', makeTable('DIM_TABLE_1', 0)],
+        ['DIM_TABLE_2', makeTable('DIM_TABLE_2', 0)],
+      ]),
+    };
+    const model = generateCDSModel(schema, 'test');
+    expect(model).to.include('@Analytics.dataCategory: #DIMENSION');
+  });
+
+  it('entity with ≤ 2 FKs not referenced by any FACT gets no annotation', () => {
+    const schema: SchemaDefinition = {
+      tables: new Map([
+        ['PLAIN_TABLE', makeTable('PLAIN_TABLE', 2)],
+      ]),
+    };
+    const model = generateCDSModel(schema, 'test');
+    expect(model).to.not.include('@Analytics.dataCategory:');
+  });
+});
+

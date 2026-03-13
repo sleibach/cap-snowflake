@@ -37,6 +37,15 @@ function translateSelect(select, credentials, params, context) {
     }
     // Check for expansions
     const hasExpansions = select.columns?.some(col => col.expand || col.inline);
+    // Pre-compute dimension JOINs for star schema groupBy navigation refs (shared across columns + GROUP BY)
+    const _dimJoins = new Map();
+    if (!hasExpansions && select.groupBy?.some((g) => g.ref?.length > 1)) {
+        for (const g of select.groupBy) {
+            if (g.ref?.length > 1) {
+                buildDimensionJoin(g.ref, context, credentials, _dimJoins);
+            }
+        }
+    }
     // Columns
     if (select.columns && select.columns.length > 0) {
         if (hasExpansions) {
@@ -59,6 +68,9 @@ function translateSelect(select, credentials, params, context) {
         else {
             // Regular columns — handle synthetic draft columns on active-entity reads
             const isDraft = isDraftTarget(context?.target, select.from);
+            // Use the pre-computed dimension JOINs (from above)
+            const dimJoins = _dimJoins;
+            const hasDimJoins = dimJoins.size > 0;
             const cols = select.columns.map(col => {
                 if (col.ref && !isDraft) {
                     const colName = col.ref[col.ref.length - 1];
@@ -67,6 +79,18 @@ function translateSelect(select, credentials, params, context) {
                     }
                     if (col.ref.length > 1 && isSyntheticDraftColumn(String(col.ref[0]))) {
                         return `NULL AS ${quoteIdentifier(col.as || colName)}`;
+                    }
+                    // Dimension nav ref in SELECT (e.g. book/title → _grp_book.TITLE)
+                    if (hasDimJoins && col.ref.length > 1) {
+                        const firstPart = col.ref[0];
+                        const assocPart = typeof firstPart === 'string' ? firstPart : String(firstPart?.id ?? firstPart);
+                        if (dimJoins.has(assocPart)) {
+                            const alias = `_grp_${toPhysicalIdentifier(assocPart).toLowerCase()}`;
+                            const lastPart = col.ref[col.ref.length - 1];
+                            const colAlias = col.as || col.ref.map((p) => typeof p === 'string' ? p : String(p?.id ?? p)).join('_');
+                            const colIdentifier = toPhysicalIdentifier(typeof lastPart === 'string' ? lastPart : String(lastPart?.id ?? lastPart));
+                            return `${alias}.${colIdentifier} AS ${quoteIdentifier(colAlias)}`;
+                        }
                     }
                     const element = context?.target?.elements?.[colName];
                     const explicitlyNonPhysical = element !== undefined &&
@@ -78,7 +102,14 @@ function translateSelect(select, credentials, params, context) {
                 return translateColumn(col);
             }).join(', ');
             sql += ` ${cols}`;
-            sql += ` FROM ${translateFrom(select.from, credentials, context?.target, params)}`;
+            let fromClause = translateFrom(select.from, credentials, context?.target, params);
+            if (hasDimJoins && !select.from.as && !select.from.join) {
+                fromClause += ' AS base';
+            }
+            sql += ` FROM ${fromClause}`;
+            if (hasDimJoins) {
+                sql += ` ${[...dimJoins.values()].join(' ')}`;
+            }
         }
     }
     else {
@@ -101,7 +132,14 @@ function translateSelect(select, credentials, params, context) {
         : undefined;
     const effectiveWhere = (select.where && select.where.length > 0) ? select.where : inlineFromWhere;
     if (effectiveWhere && effectiveWhere.length > 0) {
-        const filterCtx = { credentials, target: context?.target, resolveTable: resolveEntityName };
+        const filterCtx = {
+            credentials,
+            target: context?.target,
+            resolveTable: resolveEntityName,
+            // Enable subquery translation inside WHERE: { SELECT: {...} } → (SELECT ...)
+            // IMPORTANT: pass the outer params array so subquery bindings are appended inline.
+            translateSelect: (selectBody, outerParams) => translateSelect(selectBody, credentials, outerParams, context).sql,
+        };
         const whereClause = translateFilter(effectiveWhere, params, filterAlias, isDraftQuery, filterCtx);
         if (whereClause) {
             sql += ` WHERE ${whereClause}`;
@@ -120,7 +158,7 @@ function translateSelect(select, credentials, params, context) {
     }
     // GROUP BY
     if (select.groupBy && select.groupBy.length > 0) {
-        const groupByClause = select.groupBy.map(g => translateGroupBy(g)).join(', ');
+        const groupByClause = select.groupBy.map((g) => translateGroupBy(g, _dimJoins.size > 0 ? _dimJoins : undefined)).join(', ');
         sql += ` GROUP BY ${groupByClause}`;
     }
     // HAVING
@@ -708,11 +746,39 @@ function translateColumnFunc(col) {
     return `${funcName}()`;
 }
 /**
- * Translate GROUP BY
+ * Build a LEFT JOIN entry for a star schema dimension association.
+ * e.g. ref = ['book', 'title'] → LEFT JOIN <BOOKS_TABLE> AS _grp_book ON _grp_book.ID = base.BOOK_ID
  */
-function translateGroupBy(groupBy) {
+function buildDimensionJoin(ref, context, credentials, dimJoins) {
+    const assocName = typeof ref[0] === 'string' ? ref[0] : String(ref[0]?.id ?? ref[0]);
+    if (dimJoins.has(assocName))
+        return;
+    const assocEl = context?.target?.elements?.[assocName];
+    const targetEntityName = assocEl?.target;
+    if (!targetEntityName)
+        return;
+    const fkCol = toPhysicalIdentifier(`${assocName}_ID`);
+    const targetShortName = targetEntityName.split('.').pop();
+    const targetTable = qualifyName(targetShortName, credentials);
+    const alias = `_grp_${toPhysicalIdentifier(assocName).toLowerCase()}`;
+    dimJoins.set(assocName, `LEFT JOIN ${targetTable} AS ${alias} ON ${alias}.ID = base.${fkCol}`);
+}
+/**
+ * Translate GROUP BY
+ * For navigation path refs (ref.length > 1), uses dimension join alias if dimJoins is provided,
+ * otherwise falls back to dot-separated identifiers.
+ */
+function translateGroupBy(groupBy, dimJoins) {
     if (groupBy.ref) {
-        return groupBy.ref.map((part) => toPhysicalIdentifier(part)).join('.');
+        if (groupBy.ref.length > 1 && dimJoins) {
+            const assocName = typeof groupBy.ref[0] === 'string' ? groupBy.ref[0] : String(groupBy.ref[0]?.id ?? groupBy.ref[0]);
+            const colParts = groupBy.ref.slice(1);
+            const alias = `_grp_${toPhysicalIdentifier(assocName).toLowerCase()}`;
+            if (dimJoins.has(assocName)) {
+                return `${alias}.${colParts.map((p) => toPhysicalIdentifier(p)).join('.')}`;
+            }
+        }
+        return groupBy.ref.map((part) => toPhysicalIdentifier(typeof part === 'string' ? part : (part?.id ?? String(part)))).join('.');
     }
     return String(groupBy);
 }

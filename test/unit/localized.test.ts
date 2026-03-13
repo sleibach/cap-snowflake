@@ -232,4 +232,26 @@ describe('Localization Support', () => {
       expect(view).to.include('base.CODE = texts.CODE');
     });
   });
+
+  describe('generateTextsTable — composite key edge cases (Part E)', () => {
+    it('composite key with 3 parts generates PRIMARY KEY (LOCALE, K1, K2, K3)', () => {
+      const entity = {
+        entityName: 'Prices',
+        localizedElements: [{ name: 'label', type: 'cds.String', localized: true }],
+        keys: ['salesOrg', 'material', 'currency'],
+      };
+      const ddl = generateTextsTable(entity, credentials);
+      expect(ddl).to.include('PRIMARY KEY (LOCALE, SALESORG, MATERIAL, CURRENCY)');
+    });
+
+    it('single key without ID name generates PRIMARY KEY (LOCALE, <KEY>)', () => {
+      const entity = {
+        entityName: 'Regions',
+        localizedElements: [{ name: 'name', type: 'cds.String', localized: true }],
+        keys: ['code'],
+      };
+      const ddl = generateTextsTable(entity, credentials);
+      expect(ddl).to.include('PRIMARY KEY (LOCALE, CODE)');
+    });
+  });
 });

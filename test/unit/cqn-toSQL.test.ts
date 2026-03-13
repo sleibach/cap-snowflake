@@ -678,3 +678,89 @@ describe('CQN to SQL Translation', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+describe('Star schema — dimension navigation in groupBy', () => {
+  const credentials: import('../../src/config.js').SnowflakeCredentials = {
+    account: 'TEST', user: 'TEST_USER', database: 'TEST_DB', schema: 'TEST_SCHEMA',
+    auth: 'jwt', jwt: { privateKey: 'dummy' },
+  };
+
+  it('groupBy with plain ref generates standard GROUP BY column', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['cap_e2e.SalesFacts'] },
+        columns: [{ func: 'sum', args: [{ ref: ['units'] }], as: 'totalUnits' }],
+        groupBy: [{ ref: ['channel'] }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('GROUP BY CHANNEL');
+  });
+
+  it('groupBy with navigation path ref uses dimension join alias when context has target', () => {
+    // Simulate a CQN where groupBy has a nav ref (book/title) AND context.target.elements has the 'book' association
+    const mockTarget = {
+      name: 'cap_e2e.SalesFacts',
+      elements: {
+        book: { isAssociation: true, target: 'cap_e2e.Books', type: 'cds.Association' },
+      },
+    };
+    const cqn = {
+      SELECT: {
+        from: { ref: ['cap_e2e.SalesFacts'] },
+        columns: [{ ref: ['book', 'title'], as: 'book_title' }],
+        groupBy: [{ ref: ['book', 'title'] }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials, { target: mockTarget });
+    // Dimension JOIN should be injected
+    expect(sql).to.include('LEFT JOIN');
+    expect(sql).to.include('_grp_book');
+    expect(sql).to.include('GROUP BY');
+    expect(sql).to.include('_grp_book.');
+  });
+
+  it('groupBy + having with aggregation generates correct SQL', () => {
+    const cqn = {
+      SELECT: {
+        from: { ref: ['cap_e2e.SalesFacts'] },
+        columns: [{ func: 'sum', args: [{ ref: ['units'] }], as: 'totalUnits' }],
+        groupBy: [{ ref: ['channel'] }],
+        having: [{ func: 'sum', args: [{ ref: ['units'] }] }, '>', { val: 0 }],
+      },
+    };
+    const { sql } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('GROUP BY CHANNEL');
+    expect(sql).to.include('HAVING');
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('Large IN list — 1000+ parameters', () => {
+  const credentials: import('../../src/config.js').SnowflakeCredentials = {
+    account: 'TEST', user: 'TEST_USER', database: 'TEST_DB', schema: 'TEST_SCHEMA',
+    auth: 'jwt', jwt: { privateKey: 'dummy' },
+  };
+
+  it('WHERE ID IN (...1000 values...) generates correct param count', () => {
+    const ids = Array.from({ length: 1000 }, (_, i) =>
+      `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`
+    );
+    const cqn = {
+      SELECT: {
+        from: { ref: ['cap_e2e.Books'] },
+        columns: [{ ref: ['ID'] }],
+        where: [
+          { ref: ['ID'] },
+          'in',
+          { list: ids.map(id => ({ val: id })) },
+        ],
+      },
+    };
+    const { sql, params } = cqnToSQL(cqn, credentials);
+    expect(sql).to.include('WHERE');
+    expect(sql).to.include('IN');
+    expect(params).to.have.lengthOf(1000);
+  });
+});

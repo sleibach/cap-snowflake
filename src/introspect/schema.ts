@@ -269,12 +269,60 @@ export function generateCDSModel(schemaDefinition: SchemaDefinition, namespace =
   lines.push('// Generated: ' + new Date().toISOString());
   lines.push('');
 
+  // Compute star schema hints
+  const starAnnotations = computeStarSchemaAnnotations(schemaDefinition);
+
   for (const [tableName, metadata] of schemaDefinition.tables) {
+    const annotation = starAnnotations.get(tableName);
+    if (annotation) {
+      lines.push(annotation);
+    }
     lines.push(...generateEntityDefinition(tableName, metadata));
     lines.push('');
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Detect fact vs dimension tables and return Analytics.dataCategory annotations.
+ * Heuristic:
+ *   Fact: entity has ≥ 3 Association (FK) elements → @Analytics.dataCategory: #FACT
+ *   Dimension: entity has 0–1 associations AND is referenced by a fact → @Analytics.dataCategory: #DIMENSION
+ */
+function computeStarSchemaAnnotations(schema: SchemaDefinition): Map<string, string> {
+  const annotations = new Map<string, string>();
+  const fkCounts = new Map<string, number>();
+  const referencedBy = new Map<string, Set<string>>(); // targetTable → set of tables referencing it
+
+  for (const [tableName, metadata] of schema.tables) {
+    const fkCount = metadata.foreignKeys.length;
+    fkCounts.set(tableName, fkCount);
+    for (const fk of metadata.foreignKeys) {
+      const refs = referencedBy.get(fk.referencedTable) ?? new Set();
+      refs.add(tableName);
+      referencedBy.set(fk.referencedTable, refs);
+    }
+  }
+
+  const factTables = new Set<string>();
+  for (const [tableName, count] of fkCounts) {
+    if (count >= 3) {
+      factTables.add(tableName);
+      annotations.set(tableName, '@Analytics.dataCategory: #FACT');
+    }
+  }
+
+  for (const [tableName, referrers] of referencedBy) {
+    if (annotations.has(tableName)) continue; // already annotated as FACT
+    const ownFkCount = fkCounts.get(tableName) ?? 0;
+    const isReferencedByFact = [...referrers].some(r => factTables.has(r));
+    if (ownFkCount <= 1 && isReferencedByFact) {
+      annotations.set(tableName, '@Analytics.dataCategory: #DIMENSION');
+    }
+  }
+
+  return annotations;
 }
 
 /**

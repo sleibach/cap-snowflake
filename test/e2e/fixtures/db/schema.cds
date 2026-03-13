@@ -44,3 +44,12 @@ entity CatalogItems : cuid, managed {
   title   : String(100) @mandatory;
   price   : Decimal(10,2);
 }
+
+@Analytics.dataCategory: #FACT
+entity SalesFacts : cuid, managed {
+  book     : Association to Books;
+  region   : String(50);
+  channel  : String(50);
+  amount   : Decimal(10,2) @Aggregation.default: #SUM;
+  units    : Integer @Aggregation.default: #SUM;
+}

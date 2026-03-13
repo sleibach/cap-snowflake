@@ -7,6 +7,12 @@ export interface FilterSqlContext {
     target?: any;
     /** Resolve a CDS entity name to its physical table name (follows projection chains) */
     resolveTable?: (entityName: string) => string;
+    /**
+     * Translate a full SELECT CQN body to SQL.
+     * Provided by toSQL.ts to allow subquery translation inside WHERE clauses
+     * without creating a circular import.
+     */
+    translateSelect?: (selectBody: any, params: any[]) => string;
 }
 export interface CQNExpression {
     ref?: string[];

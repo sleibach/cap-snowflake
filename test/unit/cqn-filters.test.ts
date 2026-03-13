@@ -404,6 +404,49 @@ describe('translateSearch', () => {
 
 // ---------------------------------------------------------------------------
 
+describe('OData string functions — CONCAT, INDEXOF, TRIM (#19)', () => {
+  it('CONCAT translates to Snowflake CONCAT(a, b)', () => {
+    const params: any[] = [];
+    const xpr = [
+      { func: 'CONCAT', args: [{ ref: ['title'] }, { val: ' x' }] },
+      '=',
+      { val: 'Book x' }
+    ];
+    const result = translateFilter(xpr, params);
+    expect(result).to.include('CONCAT(TITLE, ?)');
+    expect(params).to.include(' x');
+    expect(params).to.include('Book x');
+  });
+
+  it('INDEXOF translates to (POSITION(sub IN str) - 1) for 0-based result', () => {
+    const params: any[] = [];
+    const xpr = [
+      { func: 'INDEXOF', args: [{ ref: ['title'] }, { val: 'ook' }] },
+      '=',
+      { val: 1 }
+    ];
+    const result = translateFilter(xpr, params);
+    // INDEXOF is OData 0-based; Snowflake POSITION is 1-based → subtract 1
+    expect(result).to.include('POSITION(? IN TITLE)');
+    expect(result).to.include('- 1');
+    expect(params).to.include('ook');
+  });
+
+  it('TRIM translates to TRIM(str)', () => {
+    const params: any[] = [];
+    const xpr = [
+      { func: 'TRIM', args: [{ ref: ['buyer'] }] },
+      '=',
+      { val: 'Alice' }
+    ];
+    const result = translateFilter(xpr, params);
+    expect(result).to.include('TRIM(BUYER)');
+    expect(params).to.include('Alice');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
 describe('Subquery filters (#6)', () => {
   it('translates { SELECT } in WHERE to (SELECT ...) using translateSelect callback', () => {
     const params: any[] = [];

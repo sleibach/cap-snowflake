@@ -77,10 +77,10 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | **MANAGED / SPECIAL ASPECTS** |||||
 | 60 | Managed | createdAt / createdBy auto-set on INSERT | managed.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 61 | Managed | modifiedAt / modifiedBy auto-set on UPDATE | managed.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 62 | Managed | Shared within transaction | managed.test.js | — | ❌ not tested |
+| 62 | Managed | Shared within transaction | managed.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 63 | Managed | @readonly annotation enforced | — | test/e2e/cap-http.test.ts | ✅ |
 | 64 | Temporal | Point-in-time reads (sap-valid-at header) | temporal.test.js | test/e2e/cap-http.test.ts | ⚠️ default as-of-now ✅; sap-valid-at timestamp propagation partial |
-| 65 | Temporal | UPSERT temporal data (sap-valid-from) | temporal.test.js | — | ❌ missing |
+| 65 | Temporal | UPSERT temporal data (sap-valid-from) | temporal.test.js | test/e2e/cap-http.test.ts | ✅ basic PUT tested |
 | 66 | Localized | Default locale fallback | localized.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 67 | Localized | Accept-Language header respected + content verified | localized.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 68 | Virtual | Virtual fields excluded from DB queries | — | test/unit/deploy.test.ts | ✅ unit |
@@ -88,7 +88,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 69 | Errors | SQL state → HTTP status mapping | — | test/unit/errors.test.ts | ✅ |
 | 70 | Errors | Constraint violation (unique, FK) → 409/400 | — | — | 🚫 N/A: Snowflake constraints are informational only (not enforced) |
 | 71 | Errors | Strict mode field validation errors | strictMode.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 72 | Errors | INSERT/UPDATE on non-existent entity | strictMode.test.js | — | ❌ missing |
+| 72 | Errors | INSERT/UPDATE on non-existent entity | strictMode.test.js | test/e2e/cap-http.test.ts | ✅ |
 | **NOT APPLICABLE TO SNOWFLAKE** |||||
 | 73 | N/A | HANA stored procedures | hana/test/run.test.js | — | 🚫 N/A |
 | 74 | N/A | HANA fuzzy search | hana/test/fuzzy.test.js | — | 🚫 N/A (ILIKE used instead) |
@@ -99,6 +99,11 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 79 | N/A | Streaming LargeBinary (blob) | sqlite/stream.test.js | — | 🚫 N/A (BINARY stored as hex) |
 | 80 | N/A | $batch requests | OData spec | — | 🚫 handled by CAP runtime |
 | 81 | N/A | Cursor-based pagination | — | — | 🚫 OFFSET-based only |
+| **STAR SCHEMA** |||||
+| 82 | Star Schema | $apply=aggregate(measure with sum) on FACT entity | — | test/e2e/cap-http.test.ts | ✅ |
+| 83 | Star Schema | $apply=groupby((dim_col),aggregate) on FACT entity | — | test/e2e/cap-http.test.ts | ✅ |
+| 84 | Star Schema | FACT/DIMENSION annotations in schema introspection | — | test/unit/introspect.test.ts | ✅ unit |
+| 85 | Star Schema | Dimension navigation groupBy (book/title) via cqn4sql JOIN expansion | — | test/unit/cqn-toSQL.test.ts | ✅ unit |
 
 ---
 
@@ -106,9 +111,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 
 | # | Item | Notes |
 |---|------|-------|
-| 62 | Managed within transaction | Transaction isolation test |
-| 65 | Temporal UPSERT | Time-slice insert |
-| 72 | Non-existent entity ops | 404 on update/delete of missing entity (CAP/Snowflake does not currently enforce this) |
+| — | — | No open ❌ gaps — all remaining items are N/A (🚫) |
 
 ## Completed (this session)
 
@@ -136,3 +139,8 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 63 | @readonly enforced | ✅ POST/DELETE on Authors returns 403/405 |
 | 64 | Temporal e2e | ✅ sap-valid-at header tests added (range, out-of-range) |
 | 71 | Mandatory field validation | ✅ POST /Orders without quantity returns 400/422 |
+| 72 | 404 on non-existent entity | ✅ extractDMLRowCount + req.reject(404) in onUpdate/onDelete |
+| 62 | Managed fields in transaction | ✅ POST /Catalogs with items shares createdAt |
+| 65 | Temporal UPSERT | ✅ basic PUT time-slice test added |
+| 19 | CONCAT/INDEXOF/TRIM | ✅ Explicit cases in translateFunc; INDEXOF is 0-based (POSITION-1) |
+| 82-85 | Star schema support | ✅ SalesFacts entity + introspect annotations + unit + e2e tests |

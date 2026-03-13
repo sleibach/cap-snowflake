@@ -410,7 +410,7 @@ export class SnowflakeService extends cds.DatabaseService {
     const query = req.query;
     try {
       const update = query.UPDATE;
-      
+
       if (!update) {
         throw new Error('Invalid UPDATE query');
       }
@@ -420,7 +420,15 @@ export class SnowflakeService extends cds.DatabaseService {
 
       const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
       const result = await this.execute(sql, params);
-      return result.length || 0;
+      const rowCount = extractDMLRowCount(result);
+      // Return 404 when a keyed UPDATE finds no matching row (e.g. PATCH on non-existent entity).
+      // Skip this check for internal CAP draft/system entities which may legitimately update 0 rows.
+      const entityName = req.entity ?? '';
+      const isInternalEntity = entityName.toLowerCase().includes('draft');
+      if (rowCount === 0 && !isInternalEntity) {
+        return req.reject(404, `${entityName || 'Entity'} not found`);
+      }
+      return rowCount;
     } catch (error) {
       logError('UPDATE operation failed', error);
       throw normalizeError(error);
@@ -498,10 +506,15 @@ export class SnowflakeService extends cds.DatabaseService {
 
       const { sql, params } = cqnToSQL(query, this.credentials, { target });
       const result = await this.execute(sql, params);
-
-      // Snowflake DML returns a metadata row; result.length > 0 means the statement ran.
-      // Return 1 so CAP emits 204 No Content instead of 404 Not Found.
-      return result?.length > 0 ? result.length : 1;
+      const rowCount = extractDMLRowCount(result);
+      // Return 404 when a keyed DELETE finds no matching row.
+      // Skip for internal CAP draft/system entities.
+      const entityName = req.entity ?? '';
+      const isInternalEntity = entityName.toLowerCase().includes('draft');
+      if (rowCount === 0 && !isInternalEntity) {
+        return req.reject(404, `${entityName || 'Entity'} not found`);
+      }
+      return rowCount;
     } catch (error) {
       logError('DELETE operation failed', error);
       throw normalizeError(error);
@@ -728,23 +741,45 @@ export class SnowflakeService extends cds.DatabaseService {
 }
 
 /**
+ * Extract the number of rows affected from a Snowflake DML result.
+ * DML results have a single metadata row like { "number of rows updated": 1 }.
+ */
+function extractDMLRowCount(result: any[]): number {
+  if (!result || result.length === 0) return 0;
+  const row = result[0];
+  if (!row || typeof row !== 'object') return 0;
+  for (const key of Object.keys(row)) {
+    if (key.toLowerCase().startsWith('number of rows')) {
+      const count = Number(row[key]);
+      return isNaN(count) ? 0 : count;
+    }
+  }
+  // Fallback: if result has rows but no "number of rows" key, assume 1 row affected
+  return result.length;
+}
+
+/**
  * Detect whether a SELECT has navigation property references (multi-part refs like author/name)
  * in its WHERE clause that require cqn4sql JOIN expansion.
  */
 const DRAFT_NAV_LOWER = new Set(['siblingentity', 'draftadministrativedata', 'isactiveentity', 'hasactiveentity', 'hasdraftentity']);
 
 function hasNavigationPropertyFilter(select: any): boolean {
-  const where = select?.where;
-  if (!Array.isArray(where) || where.length === 0) return false;
-  return where.some(el => {
+  const hasNavRef = (el: any): boolean => {
     if (!el || typeof el !== 'object') return false;
     if (el.ref && Array.isArray(el.ref) && el.ref.length > 1) {
       const firstPart = typeof el.ref[0] === 'string' ? el.ref[0] : el.ref[0]?.id ?? el.ref[0]?.name ?? '';
       if (DRAFT_NAV_LOWER.has(String(firstPart).toLowerCase())) return false;
-      return true; // multi-part ref that's not a draft entity → navigation filter
+      return true;
     }
     return false;
-  });
+  };
+  const where = select?.where;
+  if (Array.isArray(where) && where.length > 0 && where.some(hasNavRef)) return true;
+  // Also check groupBy for star schema navigation paths (e.g. book/title)
+  const groupBy = select?.groupBy;
+  if (Array.isArray(groupBy) && groupBy.length > 0 && groupBy.some(hasNavRef)) return true;
+  return false;
 }
 
 // Export as default

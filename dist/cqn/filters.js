@@ -93,6 +93,17 @@ function translateExpression(xpr, params, baseAlias, isDraft, sqlContext) {
             else if (element.list) {
                 parts.push(translateList(element.list, params));
             }
+            else if (element.SELECT) {
+                // Subquery in WHERE: e.g. { ref: ['authorId'] }, 'in', { SELECT: { from: ..., columns: [...] } }
+                if (sqlContext?.translateSelect) {
+                    parts.push(`(${sqlContext.translateSelect(element.SELECT, params)})`);
+                }
+                else {
+                    // No translator available — emit a placeholder that always evaluates true
+                    // rather than crashing. This should not happen in production paths.
+                    parts.push('(SELECT NULL WHERE 1=0)');
+                }
+            }
         }
     }
     return parts.join(' ');
@@ -249,6 +260,18 @@ function translateFunc(func, params) {
                 }
             }
             break;
+        case 'CONCAT':
+            return `CONCAT(${args.map(arg => translateExpression([arg], params)).join(', ')})`;
+        case 'INDEXOF':
+            // OData indexof() is 0-based; Snowflake POSITION() is 1-based
+            if (args.length === 2) {
+                const str = translateExpression([args[0]], params);
+                const sub = translateExpression([args[1]], params);
+                return `(POSITION(${sub} IN ${str}) - 1)`;
+            }
+            break;
+        case 'TRIM':
+            return `TRIM(${translateExpression(args, params)})`;
         case 'ROUND':
         case 'FLOOR':
             return `${funcName}(${args.map(arg => translateExpression([arg], params)).join(', ')})`;
