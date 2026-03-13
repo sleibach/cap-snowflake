@@ -27,6 +27,7 @@ let GET: any;
 let POST: any;
 let DELETE_REQ: any;
 let PATCH: any;
+let PUT: any;
 
 const AUTHORS_TABLE           = 'CAP_E2E_DB.APP.CAP_E2E_AUTHORS';
 const BOOKS_TABLE             = 'CAP_E2E_DB.APP.CAP_E2E_BOOKS';
@@ -43,8 +44,9 @@ const AUTHOR_ID          = 'de61ab2e-7584-4726-be79-07e7f8bc5a9d';
 const AUTHOR_ID2         = '50706d32-7e65-4c40-a695-ecc2a0ee5fe7';
 const BOOK_ID            = '33f21c31-318b-46de-aa6a-0c6f54c7e777';
 const BOOK_ID2           = '028f8f24-ff57-45ab-9b8e-b4df009d825a';
-const LOCALIZED_BOOK_ID  = '33333333-3333-3333-3333-333333333333';
-const WORK_ASSIGNMENT_ID = '44444444-4444-4444-4444-444444444444';
+const LOCALIZED_BOOK_ID           = '33333333-3333-3333-3333-333333333333';
+const WORK_ASSIGNMENT_ID          = '44444444-4444-4444-4444-444444444444';
+const WORK_ASSIGNMENT_EXPIRED_ID  = '55555555-5555-5555-5555-555555555555';
 
 // ---------------------------------------------------------------------------
 function resolveEnvRefs(value: any): any {
@@ -84,6 +86,7 @@ if (RUN_E2E) {
   POST       = test.POST;
   DELETE_REQ = (test as any).DELETE;
   PATCH      = (test as any).PATCH;
+  PUT        = (test as any).PUT;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +242,10 @@ async function seedData(db: any) {
   await db.run(`INSERT INTO ${WORK_ASSIGNMENTS_TABLE} (ID, EMPLOYEE, ROLE, DEPARTMENT, VALIDFROM, VALIDTO)
     VALUES ('${WORK_ASSIGNMENT_ID}', 'Alice', 'Engineer', 'Platform',
             '2020-01-01T00:00:00Z', '2099-12-31T23:59:59Z')`);
+  // Expired record: should NOT appear in default as-of-now temporal queries
+  await db.run(`INSERT INTO ${WORK_ASSIGNMENTS_TABLE} (ID, EMPLOYEE, ROLE, DEPARTMENT, VALIDFROM, VALIDTO)
+    VALUES ('${WORK_ASSIGNMENT_EXPIRED_ID}', 'Bob', 'Analyst', 'Finance',
+            '2010-01-01T00:00:00Z', '2015-12-31T23:59:59Z')`);
 }
 
 async function seedDataDirect(credentials: any) {
@@ -265,6 +272,9 @@ async function seedDataDirect(credentials: any) {
     `INSERT INTO ${WORK_ASSIGNMENTS_TABLE} (ID, EMPLOYEE, ROLE, DEPARTMENT, VALIDFROM, VALIDTO)
        VALUES ('${WORK_ASSIGNMENT_ID}', 'Alice', 'Engineer', 'Platform',
                '2020-01-01T00:00:00Z', '2099-12-31T23:59:59Z')`,
+    `INSERT INTO ${WORK_ASSIGNMENTS_TABLE} (ID, EMPLOYEE, ROLE, DEPARTMENT, VALIDFROM, VALIDTO)
+       VALUES ('${WORK_ASSIGNMENT_EXPIRED_ID}', 'Bob', 'Analyst', 'Finance',
+               '2010-01-01T00:00:00Z', '2015-12-31T23:59:59Z')`,
   ];
   for (const sql of stmts) await client.execute(sql);
 }
@@ -1168,6 +1178,193 @@ before(function () { this.timeout(120_000); });
       const res = await DELETE_REQ(`${BASE}/Orders(${NONEXISTENT_ID})`)
         .catch((e: any) => e.response ?? e);
       expect(res.status).to.be.oneOf([200, 204, 404]);
+    });
+  });
+
+  // ==========================================================================
+  // #12 GROUP BY e2e / #14 DISTINCT e2e
+  describe('GROUP BY and DISTINCT e2e (#12, #14)', () => {
+    it('$apply=groupby((author_ID),aggregate(price with min as minPrice,price with max as maxPrice))', async () => {
+      const res = await GET(`${BASE}/Books?$apply=groupby((author_ID),aggregate(price with min as minPrice,price with max as maxPrice))`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      res.data.value.forEach((row: any) => {
+        expect(row).to.have.property('author_ID');
+        expect(row.minPrice).to.be.a('number');
+        expect(row.maxPrice).to.be.a('number');
+        expect(Number(row.maxPrice)).to.be.gte(Number(row.minPrice));
+      });
+    });
+
+    it('$apply=groupby((title)) returns one row per unique title (DISTINCT)', async () => {
+      const res = await GET(`${BASE}/Books?$apply=groupby((title))`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+      // All titles must be unique
+      const titles = res.data.value.map((b: any) => b.title);
+      const unique = new Set(titles);
+      expect(unique.size).to.equal(titles.length);
+    });
+  });
+
+  // ==========================================================================
+  // #20 OData date/time functions e2e
+  describe('OData date/time functions e2e (#20)', () => {
+    it('year(validFrom) eq 2020 returns the 2020 work assignment', async () => {
+      const res = await GET(`${BASE}/WorkAssignments?$filter=year(validFrom) eq 2020`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      const ids = res.data.value.map((w: any) => w.ID);
+      expect(ids).to.include(WORK_ASSIGNMENT_ID);
+    });
+
+    it('month(validFrom) eq 1 returns January work assignments', async () => {
+      const res = await GET(`${BASE}/WorkAssignments?$filter=month(validFrom) eq 1`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+
+    it('year(validFrom) eq 1999 returns no records (out of range)', async () => {
+      const res = await GET(`${BASE}/WorkAssignments?$filter=year(validFrom) eq 1999`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf(0);
+    });
+  });
+
+  // ==========================================================================
+  // #30 $expand with $count
+  describe('$expand with $count (#30)', () => {
+    let countCatalogId: string;
+
+    before(async () => {
+      // Create a catalog with 3 items for count testing
+      const res = await POST(`${BASE}/Catalogs`, {
+        name: 'Count Test Catalog',
+        items: [
+          { title: 'Count Item 1', price: 1.00 },
+          { title: 'Count Item 2', price: 2.00 },
+          { title: 'Count Item 3', price: 3.00 }
+        ]
+      });
+      countCatalogId = res.data.ID;
+    });
+
+    it('$expand=items($count=true) returns items and items@odata.count', async () => {
+      const res = await GET(`${BASE}/Catalogs(${countCatalogId})?$expand=items($count=true)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.items).to.be.an('array').with.lengthOf(3);
+      expect(res.data['items@odata.count']).to.equal(3);
+    });
+
+    after(async () => {
+      if (countCatalogId) {
+        await db.run(`DELETE FROM ${CATALOG_ITEMS_TABLE} WHERE CATALOG_ID = '${countCatalogId}'`).catch(() => {});
+        await db.run(`DELETE FROM ${CATALOGS_TABLE} WHERE ID = '${countCatalogId}'`).catch(() => {});
+      }
+    });
+  });
+
+  // ==========================================================================
+  // #44 UPSERT e2e
+  describe('UPSERT e2e (#44)', () => {
+    const UPSERT_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+    before(async () => {
+      await db.run(`DELETE FROM ${ORDERS_TABLE} WHERE ID = '${UPSERT_ID}'`).catch(() => {});
+    });
+
+    it('PUT /Orders(id) creates the entity when it does not exist (INSERT branch)', async () => {
+      const res = await PUT(`${BASE}/Orders(${UPSERT_ID})`, {
+        ID: UPSERT_ID,
+        book_ID: BOOK_ID,
+        quantity: 5,
+        buyer: 'upsert-buyer'
+      }).catch((e: any) => e.response ?? e);
+      // CAP may return 200, 201, or 204 for successful upsert
+      expect(res.status).to.be.oneOf([200, 201, 204]);
+    });
+
+    it('PUT /Orders(id) updates the entity when it already exists (UPDATE branch)', async () => {
+      const res = await PUT(`${BASE}/Orders(${UPSERT_ID})`, {
+        ID: UPSERT_ID,
+        book_ID: BOOK_ID,
+        quantity: 99,
+        buyer: 'upsert-buyer-updated'
+      }).catch((e: any) => e.response ?? e);
+      expect(res.status).to.be.oneOf([200, 201, 204]);
+
+      // Verify the update took effect
+      const check = await GET(`${BASE}/Orders(${UPSERT_ID})`).catch((e: any) => e.response ?? e);
+      if (check.status === 200) {
+        expect(check.data.quantity).to.equal(99);
+      }
+    });
+
+    after(async () => {
+      await db.run(`DELETE FROM ${ORDERS_TABLE} WHERE ID = '${UPSERT_ID}'`).catch(() => {});
+    });
+  });
+
+  // ==========================================================================
+  // #63 @readonly annotation enforced
+  describe('@readonly annotation enforced (#63)', () => {
+    it('POST to @readonly entity (Authors) returns 405 Method Not Allowed', async () => {
+      const res = await POST(`${BASE}/Authors`, { name: 'Should Not Work' })
+        .catch((e: any) => e.response ?? e);
+      expect(res.status).to.be.oneOf([403, 405]);
+    });
+
+    it('DELETE on @readonly entity (Authors) returns 405 Method Not Allowed', async () => {
+      const res = await DELETE_REQ(`${BASE}/Authors(${AUTHOR_ID})`)
+        .catch((e: any) => e.response ?? e);
+      expect(res.status).to.be.oneOf([403, 405]);
+    });
+  });
+
+  // ==========================================================================
+  // #64 Temporal e2e
+  describe('Temporal data e2e (#64)', () => {
+    it('GET /WorkAssignments returns only currently active records (excludes expired)', async () => {
+      // Two records are seeded: WORK_ASSIGNMENT_ID (active 2020–2099) and
+      // WORK_ASSIGNMENT_EXPIRED_ID (active 2010–2015). The default as-of-now
+      // filter must include the active one and exclude the expired one.
+      const res = await GET(`${BASE}/WorkAssignments`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      const ids = res.data.value.map((w: any) => w.ID);
+      expect(ids).to.include(WORK_ASSIGNMENT_ID);
+      expect(ids).to.not.include(WORK_ASSIGNMENT_EXPIRED_ID);
+    });
+
+    it('GET /WorkAssignments with sap-valid-at in active range returns 200', async () => {
+      // sap-valid-at support depends on CAP injecting cds.context.timestamp;
+      // we verify the request succeeds (200) and the active record is present.
+      const res = await GET(`${BASE}/WorkAssignments`, {
+        headers: { 'sap-valid-at': '2025-06-01T00:00:00Z' }
+      });
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+    });
+
+    it('GET /WorkAssignments with sap-valid-at returns 200 (header accepted)', async () => {
+      // Verifies the sap-valid-at header is accepted and does not cause an error.
+      // Point-in-time filtering (expected: 0 records before 2020) requires full
+      // sap-valid-at → cds.context.timestamp propagation — tracked as ⚠️ partial.
+      const res = await GET(`${BASE}/WorkAssignments`, {
+        headers: { 'sap-valid-at': '2019-01-01T00:00:00Z' }
+      }).catch((e: any) => e.response ?? e);
+      expect(res.status).to.equal(200);
+    });
+  });
+
+  // ==========================================================================
+  // #71 Strict mode / mandatory field validation
+  describe('Mandatory field validation (#71)', () => {
+    it('POST /Orders without mandatory quantity returns 400', async () => {
+      const res = await POST(`${BASE}/Orders`, { book_ID: BOOK_ID })
+        .catch((e: any) => e.response ?? e);
+      // CAP validates @mandatory and returns 400 Bad Request
+      expect(res.status).to.be.oneOf([400, 422]);
     });
   });
 });

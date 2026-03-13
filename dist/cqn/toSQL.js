@@ -235,6 +235,11 @@ function processColumnsWithExpand(columns, from, credentials, _params, baseTarge
                     subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
                 }
                 expandColumns.push(`(${subQuery}) AS ${quoteIdentifier(assocName)}`);
+                if (col.count) {
+                    const cntWhere = `tcnt.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID`;
+                    const cntSubQuery = `SELECT COUNT(*) FROM ${targetTable} AS tcnt WHERE ${cntWhere}`;
+                    expandColumns.push(`(${cntSubQuery}) AS ${quoteIdentifier(assocName + '@odata.count')}`);
+                }
             }
             else {
                 const joinAlias = `expand_${joinCounter++}`;

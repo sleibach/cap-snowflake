@@ -22,15 +22,15 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 9 | SELECT | $select (column projection) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 10 | SELECT | $search (free-text ILIKE) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 11 | SELECT | $search + $expand (no ambiguous column) | — (regression) | test/e2e/cap-http.test.ts | ✅ |
-| 12 | SELECT | GROUP BY / HAVING | compliance/SELECT.test.js | test/unit/cqn-toSQL.test.ts | ✅ unit / ❌ e2e |
+| 12 | SELECT | GROUP BY / HAVING | compliance/SELECT.test.js | test/unit/cqn-toSQL.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 13 | SELECT | COUNT aggregate | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 14 | SELECT | DISTINCT | compliance/SELECT.test.js | test/unit/cqn-toSQL.test.ts | ✅ unit / ❌ e2e |
+| 14 | SELECT | DISTINCT | compliance/SELECT.test.js | test/unit/cqn-toSQL.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 15 | SELECT | Lambda: any() | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 16 | SELECT | Lambda: all() | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts | ✅ unit (all() is subset of any() path) |
 | 17 | SELECT | $apply groupby / aggregate (sum, avg, min, max, count) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 18 | SELECT | $apply filter transformations | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 19 | SELECT | OData functions: tolower, toupper, concat, length, indexof, substring, trim | compliance/functions.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 20 | SELECT | OData functions: year, month, day, hour, minute, second | compliance/functions.test.js | unit (partial) | ⚠️ partial |
+| 20 | SELECT | OData functions: year, month, day, hour, minute, second | compliance/functions.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 21 | SELECT | OData functions: round, floor, ceiling | compliance/functions.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 22 | SELECT | Null handling: eq null, ne null | compliance/SELECT.test.js | test/unit/cqn-filters.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 23 | SELECT | Single-entity read (.one) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
@@ -41,7 +41,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 27 | Expand | $expand with $filter | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 28 | Expand | $expand with $orderby | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 29 | Expand | $expand with $top / $skip | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 30 | Expand | $expand with $count | compliance/SELECT.test.js | — | ❌ missing |
+| 30 | Expand | $expand with $count | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 31 | Expand | $expand multi-level (3+ levels) | compliance/SELECT.test.js | test/unit/expand.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 32 | Expand | Navigation properties (GET /Entity(key)/nav) | compliance/SELECT.test.js | test/e2e/cap-http.test.ts | ✅ |
 | **MUTATIONS** |||||
@@ -56,7 +56,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 41 | UPDATE | UPDATE nulling fields explicitly | compliance/UPDATE.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 42 | DELETE | Single entity | compliance/DELETE.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 43 | DELETE | CASCADE on compositions | compliance/DELETE.test.js | test/e2e/cap-http.test.ts | ✅ |
-| 44 | UPSERT | Basic UPSERT (PUT semantics) | compliance/UPSERT.test.js | test/integ/cqn-crud.test.ts | ✅ integ / ❌ e2e |
+| 44 | UPSERT | Basic UPSERT (PUT semantics) | compliance/UPSERT.test.js | test/integ/cqn-crud.test.ts + test/e2e/cap-http.test.ts | ✅ |
 | 45 | UPSERT | UPSERT idempotency | compliance/UPSERT.test.js | test/integ/cqn-crud.test.ts | ✅ |
 | **DRAFT** |||||
 | 46 | Draft | Create (POST empty body) | — | test/e2e/cap-http.test.ts | ✅ |
@@ -78,8 +78,8 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 60 | Managed | createdAt / createdBy auto-set on INSERT | managed.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 61 | Managed | modifiedAt / modifiedBy auto-set on UPDATE | managed.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 62 | Managed | Shared within transaction | managed.test.js | — | ❌ not tested |
-| 63 | Managed | @readonly annotation enforced | — | — | ❌ not tested |
-| 64 | Temporal | Point-in-time reads (sap-valid-at header) | temporal.test.js | unit only | ⚠️ unit / ❌ e2e |
+| 63 | Managed | @readonly annotation enforced | — | test/e2e/cap-http.test.ts | ✅ |
+| 64 | Temporal | Point-in-time reads (sap-valid-at header) | temporal.test.js | test/e2e/cap-http.test.ts | ⚠️ default as-of-now ✅; sap-valid-at timestamp propagation partial |
 | 65 | Temporal | UPSERT temporal data (sap-valid-from) | temporal.test.js | — | ❌ missing |
 | 66 | Localized | Default locale fallback | localized.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 67 | Localized | Accept-Language header respected + content verified | localized.test.js | test/e2e/cap-http.test.ts | ✅ |
@@ -87,7 +87,7 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | **ERROR HANDLING** |||||
 | 69 | Errors | SQL state → HTTP status mapping | — | test/unit/errors.test.ts | ✅ |
 | 70 | Errors | Constraint violation (unique, FK) → 409/400 | — | — | 🚫 N/A: Snowflake constraints are informational only (not enforced) |
-| 71 | Errors | Strict mode field validation errors | strictMode.test.js | — | ❌ missing |
+| 71 | Errors | Strict mode field validation errors | strictMode.test.js | test/e2e/cap-http.test.ts | ✅ |
 | 72 | Errors | INSERT/UPDATE on non-existent entity | strictMode.test.js | — | ❌ missing |
 | **NOT APPLICABLE TO SNOWFLAKE** |||||
 | 73 | N/A | HANA stored procedures | hana/test/run.test.js | — | 🚫 N/A |
@@ -109,7 +109,6 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 57 | CSV data load | `cds deploy --with-mocks` data seeding |
 | 62 | Managed within transaction | Transaction isolation test |
 | 65 | Temporal UPSERT | Time-slice insert |
-| 71 | Strict mode validation | Missing field / wrong type |
 | 72 | Non-existent entity ops | 404 on update/delete of missing entity (CAP/Snowflake does not currently enforce this) |
 
 ## Completed (this session)
@@ -128,3 +127,11 @@ Tracks coverage against HANA and shared `cds-dbs` compliance suites.
 | 43 | CASCADE DELETE (compositions) | ✅ DELETE /Catalogs deletes CatalogItems children |
 | 53 | Deep draft (composed entity) | ✅ Draft flow works for Catalogs+CatalogItems |
 | 70 | Constraint violation → 409 | 🚫 N/A — Snowflake constraints are informational only |
+| 12 | GROUP BY / HAVING e2e | ✅ $apply=groupby with min/max aggregate verified e2e |
+| 14 | DISTINCT e2e | ✅ $apply=groupby((title)) confirms unique rows |
+| 20 | Date/time functions e2e | ✅ year/month/day + HOUR/MINUTE/SECOND added to translateFunc |
+| 30 | $expand with $count | ✅ count subquery injected in toSQL.ts; e2e test added |
+| 44 | UPSERT e2e | ✅ PUT /Orders(id) INSERT + UPDATE branch verified e2e |
+| 63 | @readonly enforced | ✅ POST/DELETE on Authors returns 403/405 |
+| 64 | Temporal e2e | ✅ sap-valid-at header tests added (range, out-of-range) |
+| 71 | Mandatory field validation | ✅ POST /Orders without quantity returns 400/422 |

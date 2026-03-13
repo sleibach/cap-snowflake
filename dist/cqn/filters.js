@@ -257,6 +257,9 @@ function translateFunc(func, params) {
         case 'YEAR':
         case 'MONTH':
         case 'DAY':
+        case 'HOUR':
+        case 'MINUTE':
+        case 'SECOND':
             return `${funcName}(${translateExpression(args, params)})`;
         default:
             // Generic function call

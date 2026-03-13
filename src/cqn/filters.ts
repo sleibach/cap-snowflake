@@ -294,6 +294,9 @@ function translateFunc(func: CQNExpression, params: any[]): string {
     case 'YEAR':
     case 'MONTH':
     case 'DAY':
+    case 'HOUR':
+    case 'MINUTE':
+    case 'SECOND':
       return `${funcName}(${translateExpression(args as any[], params)})`;
 
     default:

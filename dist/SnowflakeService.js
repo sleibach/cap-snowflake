@@ -12,6 +12,7 @@ import { wrapWithCount, stripPagination } from './cqn/pagination.js';
 import { logInfo, logError, logWarning } from './utils/logger.js';
 import { normalizeError } from './utils/errors.js';
 import { buildDeployStatements } from './ddl/deploy.js';
+import { isTemporal, getTemporalFields } from './features/temporal.js';
 const _require = createRequire(import.meta.url);
 const { onDeep } = _require('@cap-js/db-service/lib/deep-queries');
 let _cqn4sql;
@@ -119,6 +120,32 @@ export class SnowflakeService extends cds.DatabaseService {
                 catch {
                     // If cqn4sql fails (e.g. for raw queries), fall back to the original query
                     transformedQuery = query;
+                }
+            }
+            // Temporal entity: inject point-in-time WHERE conditions if CAP has not done so.
+            // CAP may set cds.context.timestamp from the sap-valid-at request header.
+            // We apply validFrom <= ts AND ts < validTo so temporal filtering is respected.
+            if (isTemporal(req.target)) {
+                const temporalFields = getTemporalFields(req.target);
+                if (temporalFields) {
+                    const ctxTs = cds.context?.timestamp ?? req.timestamp;
+                    const ts = ctxTs
+                        ? (ctxTs instanceof Date ? ctxTs.toISOString() : String(ctxTs))
+                        : new Date().toISOString();
+                    const sel = transformedQuery.SELECT ?? {};
+                    const temporalFilter = [
+                        { ref: [temporalFields.validFrom] }, '<=', { val: ts },
+                        'and', { val: ts }, '<', { ref: [temporalFields.validTo] }
+                    ];
+                    // Only inject if there are no existing temporal conditions already in WHERE
+                    const whereStr = JSON.stringify(sel.where ?? []);
+                    const alreadyHasTemporal = whereStr.includes(temporalFields.validFrom) &&
+                        whereStr.includes(temporalFields.validTo);
+                    if (!alreadyHasTemporal) {
+                        sel.where = sel.where?.length
+                            ? [...sel.where, 'and', ...temporalFilter]
+                            : temporalFilter;
+                    }
                 }
             }
             // Translate to SQL (now with JOIN-based expand support)
