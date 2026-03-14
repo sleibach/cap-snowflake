@@ -329,6 +329,69 @@ describe('CQN to SQL Translation', () => {
 
       expect(() => cqnToSQL(cqn, credentials)).to.throw();
     });
+
+    it('draft INSERT: virtual IsActiveEntity/HasDraftEntity are included (regression: lean-draft PATCH 404)', () => {
+      // CAP marks IsActiveEntity and HasDraftEntity as virtual in the runtime Draft mixin,
+      // but these columns ARE physically stored in the draft table.  The INSERT must include
+      // them explicitly so that Snowflake stores FALSE rather than NULL.
+      // Without this fix: SELECT WHERE IsActiveEntity = false returns no rows → 404.
+      const draftTarget = {
+        name: 'E2ETestService.Books.drafts',
+        elements: {
+          ID: { type: 'cds.UUID', key: true },
+          title: { type: 'cds.String' },
+          IsActiveEntity: { type: 'cds.Boolean', virtual: true },   // virtual in runtime model!
+          HasDraftEntity: { type: 'cds.Boolean', virtual: true },   // virtual in runtime model!
+          HasActiveEntity: { type: 'cds.Boolean' },
+          DraftAdministrativeData: { isAssociation: true, target: 'DRAFT.DraftAdministrativeData' },
+          DraftAdministrativeData_DraftUUID: { type: 'cds.UUID' },
+        }
+      };
+      const cqn = {
+        INSERT: {
+          into: 'E2ETestService.Books.drafts',
+          entries: [{
+            ID: 'uuid-1',
+            title: 'My Book',
+            IsActiveEntity: false,
+            HasDraftEntity: false,
+            HasActiveEntity: true,
+            DraftAdministrativeData_DraftUUID: 'draft-uuid-1',
+          }],
+        },
+      };
+      const result = cqnToSQL(cqn, credentials, { target: draftTarget });
+      // IsActiveEntity and HasDraftEntity must be in the INSERT despite being virtual
+      expect(result.sql.toUpperCase()).to.include('ISACTIVEENTITY');
+      expect(result.sql.toUpperCase()).to.include('HASDRAFTENTITY');
+      expect(result.sql.toUpperCase()).to.include('HASACTIVEENTITY');
+      // The association must NOT appear in the INSERT
+      expect(result.sql.toUpperCase()).to.not.include('DRAFTADMINISTRATIVEDATA,');
+      // Values must include false, false, true in correct positions
+      const ieIdx = result.params.indexOf(false);
+      expect(ieIdx).to.be.gte(0); // false is in params
+    });
+
+    it('non-draft INSERT: virtual columns are still excluded', () => {
+      // On non-draft (active entity) tables, virtual columns must still be skipped.
+      const activeTarget = {
+        name: 'E2ETestService.Books',
+        elements: {
+          ID: { type: 'cds.UUID', key: true },
+          title: { type: 'cds.String' },
+          IsActiveEntity: { type: 'cds.Boolean', virtual: true },   // synthetic, not stored
+        }
+      };
+      const cqn = {
+        INSERT: {
+          into: 'E2ETestService.Books',
+          entries: [{ ID: 'uuid-1', title: 'Book', IsActiveEntity: true }],
+        },
+      };
+      const result = cqnToSQL(cqn, credentials, { target: activeTarget });
+      // IsActiveEntity must NOT appear on the active entity INSERT
+      expect(result.sql.toUpperCase()).to.not.include('ISACTIVEENTITY');
+    });
   });
 
   describe('UPDATE translation', () => {

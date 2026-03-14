@@ -109,6 +109,38 @@ describe('buildDeployStatements — draft DDL', () => {
     expect(draftsStmt!.toUpperCase()).to.include('DRAFTADMINISTRATIVEDATA_DRAFTUUID');
   });
 
+  it('ISACTIVEENTITY column on draft table has DEFAULT FALSE (regression: lean-draft PATCH 404)', () => {
+    // CAP marks IsActiveEntity as virtual in the runtime Draft mixin, so INSERT never
+    // explicitly sets it.  Without DEFAULT FALSE the column stores NULL and the
+    // lean-draft PATCH handler (SELECT WHERE IsActiveEntity = false) returns no rows → 404.
+    const draftsStmt = statements.find(s =>
+      s.toUpperCase().includes('MYSERVICE_BOOKS_DRAFTS') && s.toUpperCase().startsWith('CREATE')
+    );
+    expect(draftsStmt).to.exist;
+    expect(draftsStmt).to.match(/ISACTIVEENTITY\s+BOOLEAN\s+DEFAULT\s+FALSE/i);
+  });
+
+  it('HASDRAFTENTITY column on draft table has DEFAULT FALSE', () => {
+    const draftsStmt = statements.find(s =>
+      s.toUpperCase().includes('MYSERVICE_BOOKS_DRAFTS') && s.toUpperCase().startsWith('CREATE')
+    );
+    expect(draftsStmt).to.exist;
+    expect(draftsStmt).to.match(/HASDRAFTENTITY\s+BOOLEAN\s+DEFAULT\s+FALSE/i);
+  });
+
+  it('HASACTIVEENTITY column on draft table has NO default (it is written explicitly)', () => {
+    // HasActiveEntity is NOT virtual — draftEdit sets it to true before INSERT.
+    // No default needed (and setting one could mask bugs).
+    const draftsStmt = statements.find(s =>
+      s.toUpperCase().includes('MYSERVICE_BOOKS_DRAFTS') && s.toUpperCase().startsWith('CREATE')
+    );
+    expect(draftsStmt).to.exist;
+    // Must contain the column name
+    expect(draftsStmt!.toUpperCase()).to.include('HASACTIVEENTITY');
+    // Must NOT have a default on HasActiveEntity
+    expect(draftsStmt).to.not.match(/HASACTIVEENTITY\s+BOOLEAN\s+DEFAULT/i);
+  });
+
   it('non-draft entity (Authors) does NOT produce a _DRAFTS table', () => {
     const authorDrafts = statements.filter(s =>
       s.toUpperCase().includes('AUTHORS_DRAFTS') || s.toUpperCase().includes('AUTHORS.DRAFTS')

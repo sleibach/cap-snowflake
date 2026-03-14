@@ -972,13 +972,20 @@ function translateInsert(
     const targetElements = context?.target?.elements;
     const firstEntry = insert.entries[0];
     const allCols = Object.keys(firstEntry);
+    // On draft tables, IsActiveEntity and HasDraftEntity are marked `virtual: true`
+    // in CAP's runtime Draft mixin but ARE physically stored in the DB.  Do NOT skip
+    // them based on virtual — onInsert sets them to false before this point so they
+    // end up in the INSERT explicitly rather than relying solely on DEFAULT FALSE.
+    const isDraftInsert = !!(context?.target?.name?.endsWith('.drafts'));
     const columns = targetElements
       ? allCols.filter(col => {
           const el = targetElements[col];
           // Keep the column if: no element metadata (unknown → keep for safety),
           // or element exists with a type (physical column), but not virtual/association.
           if (!el) return false; // element not in target model — skip
-          if (el.virtual || el.isAssociation) return false;
+          if (el.isAssociation) return false;
+          // For draft tables: include virtual columns that are physically stored
+          if (el.virtual && !isDraftInsert) return false;
           return true;
         })
       : allCols;

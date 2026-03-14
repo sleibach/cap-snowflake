@@ -251,7 +251,7 @@ export function buildDeployStatements(
     if (name.endsWith('.texts') && !def['@cds.persistence.name']) continue;
 
     const tableName = getPersistenceName(name, def);
-    const entityDef = toEntityDefinition(tableName, def);
+    const entityDef = toEntityDefinition(tableName, def, name);
     if (Object.keys(entityDef.elements).length === 0) continue;
 
     const externalCfg = getExternalTableConfig(def);
@@ -367,7 +367,7 @@ export function generateMigrationStatements(
     const tableName = getPersistenceName(name, def);
     const tableUpper = tableName.toUpperCase();
     const existing = existingCols.get(tableUpper) ?? new Set<string>();
-    const entityDef = toEntityDefinition(tableName, def);
+    const entityDef = toEntityDefinition(tableName, def, name);
 
     for (const [colName, colDef] of Object.entries(entityDef.elements)) {
       const colUpper = colName.toUpperCase();
@@ -498,15 +498,36 @@ function getPersistenceName(name: string, definition: CSNDefinition): string {
   return name.replace(/\./g, '_').toUpperCase();
 }
 
-function toEntityDefinition(name: string, definition: CSNDefinition): EntityDefinition {
+/**
+ * Draft boolean columns that must default to FALSE so that Snowflake stores
+ * the correct value when they are skipped by INSERT (they are marked
+ * `virtual: true` in the CAP runtime model's Draft mixin, so adapters never
+ * include them in generated INSERT statements).
+ */
+const DRAFT_BOOL_DEFAULTS: Record<string, boolean> = {
+  IsActiveEntity: false,
+  HasDraftEntity: false,
+};
+
+function toEntityDefinition(name: string, definition: CSNDefinition, entityName?: string): EntityDefinition {
   const elements = definition.elements || {};
   const mappedElements: Record<string, ElementDefinition> = {};
+  const isDraftEntity = !!(entityName?.endsWith('.drafts'));
 
   for (const [elementName, element] of Object.entries(elements)) {
     // Skip associations/compositions/virtual elements; managed foreign keys are separate elements in linked CSN.
     if (element.virtual) continue;
     if (element.target || element.isAssociation) continue;
     if (!element.type) continue;
+
+    // For draft tables, IsActiveEntity and HasDraftEntity need DEFAULT FALSE so
+    // that rows inserted without these columns (they are virtual in the runtime
+    // model) get FALSE rather than NULL.  Without the default, the PATCH handler
+    // in lean-draft.js queries WHERE IsActiveEntity = false and finds nothing.
+    let defaultVal: any = element.default?.val;
+    if (isDraftEntity && defaultVal === undefined && elementName in DRAFT_BOOL_DEFAULTS) {
+      defaultVal = DRAFT_BOOL_DEFAULTS[elementName];
+    }
 
     const vectorCfg = getVectorConfig(element);
     mappedElements[elementName] = {
@@ -516,7 +537,7 @@ function toEntityDefinition(name: string, definition: CSNDefinition): EntityDefi
       scale: element.scale,
       key: element.key,
       notNull: element.notNull || element.key || element['@mandatory'] === true,
-      default: element.default?.val,
+      default: defaultVal,
       vectorConfig: vectorCfg,
     };
   }
