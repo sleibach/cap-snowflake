@@ -553,7 +553,7 @@ describe('CQN to SQL Translation', () => {
       }
     };
 
-    it('emits TRUE/FALSE constants for draft indicator columns in expand context', () => {
+    it('emits TRUE/FALSE constants for draft indicator columns in expand context (active entity)', () => {
       const cqn = {
         SELECT: {
           from: { ref: ['Books'] },
@@ -575,6 +575,46 @@ describe('CQN to SQL Translation', () => {
       expect(result.sql).to.include('NULL AS "DraftAdministrativeData__DraftUUID"');
       // No physical join on DraftAdministrativeData
       expect(result.sql).not.to.include('DRAFTADMINISTRATIVEDATA_ID');
+    });
+
+    it('reads physical HasActiveEntity/IsActiveEntity/HasDraftEntity from .drafts table with expand (regression: draftEdit returns HasActiveEntity=false)', () => {
+      // CAP's lean-draft PATCH handler and _readAfterDraftAction SELECT from the .drafts table
+      // with $expand=DraftAdministrativeData.  All columns go through processColumnsWithExpand.
+      // Before this fix, HasActiveEntity/IsActiveEntity/HasDraftEntity were substituted with
+      // FALSE/TRUE/FALSE constants even on the draft table, returning wrong values.
+      const draftsTarget = {
+        name: 'E2ETestService.Books.drafts',
+        elements: {
+          ID: { type: 'cds.UUID', key: true },
+          title: { type: 'cds.String' },
+          IsActiveEntity: { type: 'cds.Boolean', virtual: true },   // virtual in runtime model
+          HasActiveEntity: { type: 'cds.Boolean' },
+          HasDraftEntity: { type: 'cds.Boolean', virtual: true },   // virtual in runtime model
+          DraftAdministrativeData_DraftUUID: { type: 'cds.UUID' },
+          DraftAdministrativeData: { target: 'DRAFT.DraftAdministrativeData', isAssociation: true },
+        }
+      };
+      const cqn = {
+        SELECT: {
+          from: { ref: [{ id: 'E2ETestService.Books.drafts', where: [{ ref: ['ID'] }, '=', { val: 'uuid-1' }] }] },
+          columns: [
+            { ref: ['ID'] },
+            { ref: ['HasActiveEntity'] },
+            { ref: ['IsActiveEntity'] },
+            { ref: ['HasDraftEntity'] },
+            { ref: ['title'] },
+            { ref: ['DraftAdministrativeData'], expand: [{ ref: ['InProcessByUser'] }] },
+          ],
+        },
+      };
+      const result = cqnToSQL(cqn, credentials, { target: draftsTarget });
+      // On a draft table these must be physical column references, NOT constants
+      expect(result.sql).to.include('HASACTIVEENTITY');
+      expect(result.sql).not.to.include('FALSE AS "HasActiveEntity"');
+      expect(result.sql).to.include('ISACTIVEENTITY');
+      expect(result.sql).not.to.include('TRUE AS "IsActiveEntity"');
+      expect(result.sql).to.include('HASDRAFTENTITY');
+      expect(result.sql).not.to.include('FALSE AS "HasDraftEntity"');
     });
 
     it('UPDATE with inline WHERE in entity ref (CAP single-entity PATCH)', () => {

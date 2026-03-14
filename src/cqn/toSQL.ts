@@ -165,13 +165,16 @@ function translateSelect(
       const hasDimJoins = dimJoins.size > 0;
 
       const cols = select.columns.map(col => {
-        if (col.ref && !isDraft) {
+        if (col.ref) {
           const colName = col.ref[col.ref.length - 1];
-          if (isSyntheticDraftColumn(colName)) {
-            return `${syntheticColumnValue(colName)} AS ${quoteIdentifier(col.as || colName)}`;
-          }
-          if (col.ref.length > 1 && isSyntheticDraftColumn(String(col.ref[0]))) {
-            return `NULL AS ${quoteIdentifier(col.as || colName)}`;
+          if (!isDraft) {
+            // Active entity: replace synthetic draft columns with constants
+            if (isSyntheticDraftColumn(colName)) {
+              return `${syntheticColumnValue(colName)} AS ${quoteIdentifier(col.as || colName)}`;
+            }
+            if (col.ref.length > 1 && isSyntheticDraftColumn(String(col.ref[0]))) {
+              return `NULL AS ${quoteIdentifier(col.as || colName)}`;
+            }
           }
           // Dimension nav ref in SELECT (e.g. book/title → _grp_book.TITLE)
           if (hasDimJoins && col.ref.length > 1) {
@@ -185,8 +188,13 @@ function translateSelect(
               return `${alias}.${colIdentifier} AS ${quoteIdentifier(colAlias)}`;
             }
           }
+          // For both active and draft tables: suppress navigation properties and
+          // non-physical virtual elements (e.g. DraftMessages on draft tables).
+          // Exception: virtual draft booleans (IsActiveEntity, HasDraftEntity) ARE
+          // stored physically on draft tables — let them pass through to translateColumn.
           const element = context?.target?.elements?.[colName];
-          const explicitlyNonPhysical = element !== undefined &&
+          const isVirtualDraftBool = isDraft && element?.virtual && isSyntheticDraftColumn(colName);
+          const explicitlyNonPhysical = !isVirtualDraftBool && element !== undefined &&
             (!!element.virtual || !!element.target || !element.type);
           if (explicitlyNonPhysical) {
             return `${syntheticColumnValue(colName)} AS ${quoteIdentifier(col.as || colName)}`;
@@ -461,19 +469,20 @@ function processColumnsWithExpand(
         // Multi-part nav refs (e.g. DraftAdministrativeData.DraftMessages)
         if (col.ref.length > 1) {
           baseColumns.push(`NULL AS ${quoteIdentifier(col.as || colName)}`);
-        } else if (isSyntheticDraftColumn(colName)) {
-          // Synthetic draft indicator columns (IsActiveEntity, HasDraftEntity, etc.)
-          // do not exist on active-entity tables; emit constant values.
-          // On actual draft tables they ARE physical but only appear in queries that
-          // go through the non-expand path (translateColumn), not here.
+        } else if (!isDraft && isSyntheticDraftColumn(colName)) {
+          // Synthetic draft indicator columns (IsActiveEntity, HasDraftEntity, HasActiveEntity, etc.)
+          // do not exist on active-entity tables — emit constant values.
+          // On DRAFT tables these ARE physical columns; fall through to the physical-column path.
           baseColumns.push(`${syntheticColumnValue(colName)} AS ${quoteIdentifier(alias)}`);
         } else {
-          // Regular physical column.
+          // Regular physical column — also covers draft boolean columns on .drafts tables.
           // FK columns like author_ID are NOT in the CDS runtime model elements
           // (only in cds.compile.for.sql), but they ARE physical DB columns.
-          // Only suppress a column if the model explicitly marks it virtual/association.
+          // Only suppress a column if the model explicitly marks it virtual/association AND
+          // we are NOT on a draft table (where virtual draft booleans ARE stored physically).
           const element = baseTarget?.elements?.[colName];
-          const explicitlyNonPhysical = element !== undefined &&
+          const isVirtualDraftBool = isDraft && element?.virtual && isSyntheticDraftColumn(colName);
+          const explicitlyNonPhysical = !isVirtualDraftBool && element !== undefined &&
             (!!element.virtual || !!element.target || !element.type);
           if (explicitlyNonPhysical) {
             baseColumns.push(`${syntheticColumnValue(colName)} AS ${quoteIdentifier(alias)}`);
@@ -984,8 +993,10 @@ function translateInsert(
           // or element exists with a type (physical column), but not virtual/association.
           if (!el) return false; // element not in target model — skip
           if (el.isAssociation) return false;
-          // For draft tables: include virtual columns that are physically stored
-          if (el.virtual && !isDraftInsert) return false;
+          if (el.items) return false; // array/composition element (e.g. DraftMessages) — not physically stored
+          // For draft tables: include virtual columns that have a physical type (e.g. IsActiveEntity, HasDraftEntity)
+          // but NOT virtual elements without a type (computed arrays, DraftMessages, etc.)
+          if (el.virtual && (!isDraftInsert || !el.type)) return false;
           return true;
         })
       : allCols;
