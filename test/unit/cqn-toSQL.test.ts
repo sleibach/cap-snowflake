@@ -676,6 +676,87 @@ describe('CQN to SQL Translation', () => {
       expect(result.sql).to.include('"author__name"');
     });
 
+    it('SiblingEntity column emits NULL on active entity table (no-expand path)', () => {
+      // Fiori Elements requests SiblingEntity as a column; the adapter must not try
+      // to reference a physical SIBLINGENTITY column (it does not exist).
+      const target = {
+        name: 'E2ETestService.Books',
+        elements: {
+          ID: { type: 'cds.UUID', key: true },
+          title: { type: 'cds.String' },
+          SiblingEntity: { target: 'E2ETestService.Books', isAssociation: true },
+        }
+      };
+      const cqn = {
+        SELECT: {
+          from: { ref: ['E2ETestService.Books'] },
+          columns: [
+            { ref: ['ID'] },
+            { ref: ['title'] },
+            { ref: ['SiblingEntity'] },
+          ],
+        },
+      };
+      const result = cqnToSQL(cqn, credentials, { target });
+      expect(result.sql).not.to.include('SIBLINGENTITY');
+      expect(result.sql).to.include('NULL AS "SiblingEntity"');
+    });
+
+    it('SiblingEntity expand emits per-field NULLs on active entity table (no JOIN)', () => {
+      // When SiblingEntity has a nested expand, each expanded column is emitted
+      // as NULL — same flat pattern as real to-one expands.  No JOIN is attempted
+      // against the non-existent SiblingEntity table.
+      const target = {
+        name: 'E2ETestService.Books',
+        elements: {
+          ID: { type: 'cds.UUID', key: true },
+          title: { type: 'cds.String' },
+          SiblingEntity: { target: 'E2ETestService.Books', isAssociation: true },
+        }
+      };
+      const cqn = {
+        SELECT: {
+          from: { ref: ['E2ETestService.Books'] },
+          columns: [
+            { ref: ['ID'] },
+            { ref: ['SiblingEntity'], expand: [{ ref: ['ID'] }, { ref: ['IsActiveEntity'] }] },
+          ],
+        },
+      };
+      const result = cqnToSQL(cqn, credentials, { target });
+      // No JOIN — synthetic association, not a real DB relation
+      expect(result.sql).not.to.include('LEFT JOIN');
+      // Each expanded column emitted as NULL (flat column pattern)
+      expect(result.sql).to.include('NULL AS "SiblingEntity__ID"');
+      expect(result.sql).to.include('NULL AS "SiblingEntity__IsActiveEntity"');
+      // Must not reference a non-existent physical column
+      expect(result.sql.toUpperCase()).not.to.include(' SIBLINGENTITY ');
+    });
+
+    it('active entity SELECT with inline WHERE (SiblingEntity navigation result)', () => {
+      // After lean-draft removes SiblingEntity from the ref and flips IsActiveEntity,
+      // the adapter receives a plain SELECT with an inline WHERE containing only the
+      // key predicate.  Verify a valid, non-empty SQL is produced.
+      const target = {
+        name: 'E2ETestService.Books',
+        elements: {
+          ID: { type: 'cds.UUID', key: true },
+          title: { type: 'cds.String' },
+        }
+      };
+      const cqn = {
+        SELECT: {
+          from: { ref: [{ id: 'E2ETestService.Books', where: [{ ref: ['ID'] }, '=', { val: 'abc-123' }] }] },
+          columns: [{ ref: ['ID'] }, { ref: ['title'] }],
+          one: true,
+        },
+      };
+      const result = cqnToSQL(cqn, credentials, { target });
+      expect(result.sql).to.match(/SELECT.*FROM/);
+      expect(result.sql).to.include('WHERE ID = ?');
+      expect(result.params).to.include('abc-123');
+    });
+
     it('still joins physical associations when FK exists on base entity', () => {
       const target = {
         elements: {

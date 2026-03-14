@@ -779,6 +779,27 @@ before(function () { this.timeout(120_000); });
       expect(res.data.IsActiveEntity).to.equal(false);
     });
 
+    it('GET SiblingEntity of draft returns the active counterpart', async () => {
+      // Fiori Elements navigates to SiblingEntity after draftEdit to display
+      // the active record alongside the draft in the header area.
+      const res = await GET(
+        `${BASE}/Books(ID=${draftId},IsActiveEntity=false)/SiblingEntity`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.ID).to.equal(draftId);
+      expect(res.data.IsActiveEntity).to.equal(true);
+    });
+
+    it('GET SiblingEntity of active returns the draft counterpart', async () => {
+      // Fiori Elements navigates in the reverse direction too.
+      const res = await GET(
+        `${BASE}/Books(ID=${draftId},IsActiveEntity=true)/SiblingEntity`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.ID).to.equal(draftId);
+      expect(res.data.IsActiveEntity).to.equal(false);
+    });
+
     it('DELETE draft book discards the draft copy', async () => {
       // draftDiscard in CAP is done via DELETE on the draft entity (IsActiveEntity=false)
       const res = await DELETE_REQ(`${BASE}/Books(ID=${draftId},IsActiveEntity=false)`);
