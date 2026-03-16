@@ -14,10 +14,11 @@ SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Ap
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Prerequisites](#prerequisites)
-3. [Installation](#installation)
-4. [Quick Start](#quick-start)
-5. [Authentication](#authentication)
+2. [Architect's Note — When to Use Snowflake vs. HANA](#architects-note--when-to-use-snowflake-vs-hana)
+3. [Prerequisites](#prerequisites)
+4. [Installation](#installation)
+5. [Quick Start](#quick-start)
+6. [Authentication](#authentication)
    - [JWT Key-Pair](#jwt-key-pair-recommended)
    - [SDK / Password](#sdk--password)
 6. [Configuration Reference](#configuration-reference)
@@ -64,6 +65,18 @@ SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Ap
 |------|----------|---------------|-----------------|
 | **SQL API** (default) | HTTPS REST | JWT key-pair | SAP BTP, Cloud Foundry, serverless |
 | **SDK** | Native Snowflake driver | Username/password | On-premise, local development |
+
+---
+
+## Architect's Note — When to Use Snowflake vs. HANA
+
+While this adapter makes it technically possible to use Snowflake as the primary transactional database for a CAP application, that does not mean it is always the right choice. Snowflake is a cloud data warehouse optimised for large-scale analytical workloads — massively parallel scans, complex aggregations, and multi-terabyte joins across historical data. HANA, by contrast, is purpose-built for high-frequency OLTP: row-level locking, sub-millisecond point reads, and tight transactional guarantees that Fiori-driven business applications rely on.
+
+Using Snowflake as a transactional store means working against the grain of how the platform is designed and priced. Snowflake's per-second compute billing and connection latency profile favour batch and analytical queries, not the many small, latency-sensitive reads and writes that a transactional UI generates. Draft handling, deep insertions, and concurrent user sessions are functional — but they stress exactly the characteristics where Snowflake offers the least advantage.
+
+The recommended architecture for most SAP landscapes is the one shown in [Pattern B](#pattern-b--named-secondary-database-alongside-hana-or-sqlite): HANA handles all transactional data; Snowflake serves as a downstream analytical store or data mart — fed by replication or ETL — where complex reporting, ML scoring, and cross-system aggregations run without impacting the transactional tier.
+
+The one pragmatic exception is cost consolidation: if Snowflake is already the only database available in a given environment and the workload is genuinely light, using it as the sole persistence layer can make sense. But that is an infrastructure constraint driving an architectural decision, not an architectural best practice. Choose the right tool for the job, not just the available one.
 
 ---
 
