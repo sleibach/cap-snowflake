@@ -1,109 +1,65 @@
-# CAP Snowflake Example Service
+# Bookshop — Snowflake as primary database
 
-This is a sample CAP application demonstrating the Snowflake database adapter.
+A minimal CAP bookshop that uses Snowflake as its only database.
+Standard CRUD for service projections works out of the box — no custom `.js` handler is needed.
 
-## Setup
-
-1. **Configure Snowflake credentials** in `package.json` under `cds.requires.db.credentials`
-
-2. **Set environment variables** for JWT authentication:
-   ```bash
-   export SNOWFLAKE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
-   ...
-   -----END PRIVATE KEY-----"
-   export SNOWFLAKE_PASSPHRASE="your-passphrase"
-   ```
-
-3. **Create Snowflake tables** manually (DDL auto-generation coming soon):
-   ```sql
-   CREATE TABLE BOOKS (
-     ID VARCHAR(36) PRIMARY KEY,
-     TITLE VARCHAR(100) NOT NULL,
-     AUTHOR_ID VARCHAR(36),
-     PRICE NUMBER(10,2),
-     STOCK NUMBER(38,0),
-     DESCRIPTION TEXT,
-     CREATEDAT TIMESTAMP_NTZ,
-     CREATEDBY VARCHAR(100),
-     MODIFIEDAT TIMESTAMP_NTZ,
-     MODIFIEDBY VARCHAR(100)
-   );
-
-   CREATE TABLE AUTHORS (
-     ID VARCHAR(36) PRIMARY KEY,
-     NAME VARCHAR(100) NOT NULL,
-     COUNTRY VARCHAR(2),
-     CREATEDAT TIMESTAMP_NTZ,
-     CREATEDBY VARCHAR(100),
-     MODIFIEDAT TIMESTAMP_NTZ,
-     MODIFIEDBY VARCHAR(100)
-   );
-
-   CREATE TABLE ORDERS (
-     ID VARCHAR(36) PRIMARY KEY,
-     BOOK_ID VARCHAR(36),
-     QUANTITY NUMBER(38,0) NOT NULL,
-     BUYER VARCHAR(100),
-     TOTAL NUMBER(10,2),
-     CREATEDAT TIMESTAMP_NTZ,
-     CREATEDBY VARCHAR(100),
-     MODIFIEDAT TIMESTAMP_NTZ,
-     MODIFIEDBY VARCHAR(100)
-   );
-   ```
-
-4. **Install dependencies**:
-   ```bash
-   npm install
-   ```
-
-5. **Run the service**:
-   ```bash
-   npm start
-   ```
-
-## Testing OData Queries
-
-Once the service is running, try these OData queries:
-
-### Get all books
 ```
-GET http://localhost:4004/catalog/Books
+db/
+  schema.cds          ← domain model (Books, Authors, Orders)
+  data/               ← CSV seed data loaded on first deploy
+srv/
+  catalog-service.cds ← OData service projections — no handler file
 ```
 
-### Get books with $select
-```
-GET http://localhost:4004/catalog/Books?$select=title,price
+## Local development with SQLite
+
+The `[development]` profile in `package.json` switches the DB to an in-memory SQLite instance
+so you can iterate without a Snowflake connection:
+
+```bash
+npm install
+cds watch          # uses SQLite in memory, hot-reloads on file changes
 ```
 
-### Filter books by price
-```
-GET http://localhost:4004/catalog/Books?$filter=price lt 20
+## Deploy to Snowflake
+
+### 1. Copy and fill in the credentials template
+
+```bash
+cp .cdsrc-private.json.template .cdsrc-private.json
+# edit .cdsrc-private.json — fill in account, user, role, warehouse, database, schema
 ```
 
-### Order books
-```
-GET http://localhost:4004/catalog/Books?$orderby=title asc
+Or set via environment variables referenced in the template:
+
+```bash
+export SNOWFLAKE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----"
+export SNOWFLAKE_PASSPHRASE="your-passphrase"   # omit if key is unencrypted
 ```
 
-### Pagination
-```
-GET http://localhost:4004/catalog/Books?$top=10&$skip=0
+### 2. Deploy schema and seed data
+
+```bash
+npm run deploy
 ```
 
-### Count
-```
-GET http://localhost:4004/catalog/Books?$count=true
+This creates `BOOKS`, `AUTHORS`, and `ORDERS` tables in Snowflake and loads the CSV files
+from `db/data/` as initial data.
+
+### 3. Start the service
+
+```bash
+npm start
 ```
 
-### Submit an order (action)
-```
-POST http://localhost:4004/catalog/submitOrder
-Content-Type: application/json
+## OData queries
 
-{
-  "book": "book-id-here",
-  "quantity": 2
-}
 ```
-
+GET  http://localhost:4004/catalog/Books
+GET  http://localhost:4004/catalog/Books?$select=title,price&$filter=price lt 15
+GET  http://localhost:4004/catalog/Books?$expand=author
+GET  http://localhost:4004/catalog/Books?$orderby=title asc&$top=10
+POST http://localhost:4004/catalog/Orders   {"book_ID":"<uuid>","quantity":2,"buyer":"alice"}
+```

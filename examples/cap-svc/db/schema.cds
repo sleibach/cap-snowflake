@@ -17,9 +17,8 @@ entity Authors : cuid, managed {
 }
 
 entity Orders : cuid, managed {
-  book     : Association to Books;
+  book     : Association to Books @mandatory;
   quantity : Integer @mandatory;
   buyer    : String(100);
   total    : Decimal(10, 2);
 }
-

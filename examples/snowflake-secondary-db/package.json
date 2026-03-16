@@ -1,13 +1,14 @@
 {
-  "name": "cap-snowflake-bookshop",
+  "name": "cap-snowflake-secondary-db",
   "version": "1.0.0",
-  "description": "Bookshop CAP service — Snowflake as the primary database",
+  "description": "CAP service — HANA as primary DB, Snowflake as a named secondary DB for analytics",
   "scripts": {
     "start": "cds-serve",
     "watch": "cds watch",
-    "deploy": "cds deploy --to snowflake"
+    "deploy": "cds deploy --to hana"
   },
   "dependencies": {
+    "@cap-js/hana": "^2",
     "@sap/cds": "^9",
     "cap-snowflake": "github:sleibach/cap-snowflake",
     "express": "^4"
@@ -18,6 +19,9 @@
   "cds": {
     "requires": {
       "db": {
+        "kind": "hana"
+      },
+      "snowflake": {
         "kind": "snowflake",
         "impl": "node_modules/cap-snowflake"
       }
@@ -27,5 +31,6 @@
         "db": { "kind": "sqlite", "credentials": { "url": ":memory:" } }
       }
     }
-  }
+  },
+  "private": true
 }

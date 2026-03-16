@@ -1,0 +1,21 @@
+{
+  "cds": {
+    "requires": {
+      "snowflake": {
+        "credentials": {
+          "account": "myorg-myaccount",
+          "host": "myorg-myaccount.eu-central-1.snowflakecomputing.com",
+          "user": "CAP_SVC_USER",
+          "role": "CAP_SVC_ROLE",
+          "warehouse": "CAP_WH",
+          "database": "CAP_DB",
+          "schema": "DATA_MART",
+          "auth": "jwt",
+          "jwt": {
+            "privateKey": "env:SNOWFLAKE_PRIVATE_KEY"
+          }
+        }
+      }
+    }
+  }
+}

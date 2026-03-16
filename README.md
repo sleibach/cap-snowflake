@@ -47,9 +47,10 @@ SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Ap
 12. [Identifier Handling](#identifier-handling)
 13. [Limitations](#limitations)
 14. [Troubleshooting](#troubleshooting)
-15. [Development](#development)
-16. [License](#license)
-17. [Support](#support)
+15. [Example Projects](#example-projects)
+16. [Development](#development)
+17. [License](#license)
+18. [Support](#support)
 
 ---
 
@@ -84,26 +85,33 @@ npm install github:sleibach/cap-snowflake
 
 ## Quick Start
 
-### 1. Register the adapter
+There are two typical usage patterns: Snowflake as the **primary (only) database**, or as a **named secondary database** alongside a primary DB such as HANA.
 
-Add to your application's `package.json`:
+---
+
+### Pattern A — Primary database
+
+Use this when Snowflake is the sole persistence layer for the application.
+
+**`package.json`:**
 
 ```json
 {
+  "dependencies": {
+    "cap-snowflake": "github:sleibach/cap-snowflake"
+  },
   "cds": {
     "requires": {
       "db": {
         "kind": "snowflake",
-        "impl": "cap-snowflake"
+        "impl": "node_modules/cap-snowflake"
       }
     }
   }
 }
 ```
 
-### 2. Provide credentials
-
-Create `~/.cdsrc.json` for local development (or bind via a user-provided service on Cloud Foundry):
+**Credentials** — `~/.cdsrc.json` (local dev) or a bound user-provided service on BTP/CF:
 
 ```json
 {
@@ -128,14 +136,97 @@ Create `~/.cdsrc.json` for local development (or bind via a user-provided servic
 }
 ```
 
-> **Cloud Foundry / BTP**: Supply credentials at runtime via a user-provided service instance bound to the application. Do not hard-code credentials in project files or environment variables stored in the repository.
-
-### 3. Deploy and serve
-
 ```bash
 cds deploy --to snowflake    # creates tables in Snowflake
 cds serve                    # starts the CAP OData service
 ```
+
+---
+
+### Pattern B — Named secondary database (alongside HANA or SQLite)
+
+The more common real-world scenario is using Snowflake as an **analytics / reporting data mart** while a primary DB (HANA, SQLite) handles transactional data. Register the adapter under a custom service name instead of `db`.
+
+**`package.json`:**
+
+```json
+{
+  "dependencies": {
+    "@cap-js/hana": "^2",
+    "cap-snowflake": "github:sleibach/cap-snowflake"
+  },
+  "cds": {
+    "requires": {
+      "db": { "kind": "hana" },
+      "snowflake": {
+        "kind": "snowflake",
+        "impl": "node_modules/cap-snowflake"
+      }
+    }
+  }
+}
+```
+
+**Credentials** — provide separately for each service in `~/.cdsrc-private.json`:
+
+```json
+{
+  "cds": {
+    "requires": {
+      "snowflake": {
+        "credentials": {
+          "account": "myorg-myaccount",
+          "host": "myorg-myaccount.eu-central-1.snowflakecomputing.com",
+          "user": "CAP_SVC_USER",
+          "role": "CAP_SVC_ROLE",
+          "warehouse": "CAP_WH",
+          "database": "CAP_DB",
+          "schema": "DATA_MART",
+          "auth": "jwt",
+          "jwt": {
+            "privateKey": "env:SNOWFLAKE_PRIVATE_KEY"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Service handler** — connect to the named service and delegate reads:
+
+```js
+// srv/MyAnalyticsService.js
+const cds = require('@sap/cds');
+
+module.exports = async function () {
+  const snowflake = await cds.connect.to('snowflake');
+
+  this.on('READ', 'MaterialValuation', async (req) => {
+    return snowflake.run(req.query);
+  });
+};
+```
+
+**CDS model** — mark the entity as non-persistent in the primary DB and map it to the Snowflake table name:
+
+```cds
+// srv/MyAnalyticsService.cds
+service MyAnalyticsService {
+  @cds.persistence.skip
+  @cds.persistence.name: 'MATERIAL_VALUATION'
+  entity MaterialValuation {
+    key material_id : String;
+    name            : String;
+    stock           : Decimal;
+    coverage_days   : Decimal;
+  };
+}
+```
+
+`@cds.persistence.skip` prevents CAP from trying to deploy this entity to the primary DB. `@cds.persistence.name` maps it to the physical Snowflake table name.
+
+> **Cloud Foundry / BTP**: Supply credentials at runtime via a user-provided service instance bound to the application. Do not hard-code credentials in project files or environment variables stored in the repository.
 
 ---
 
@@ -766,6 +857,19 @@ GRANT USAGE ON SCHEMA CAP_DB.APP TO ROLE CAP_ROLE;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA CAP_DB.APP TO ROLE CAP_ROLE;
 GRANT USAGE ON WAREHOUSE CAP_WH TO ROLE CAP_ROLE;
 ```
+
+---
+
+## Example Projects
+
+Two ready-to-run examples are in the `examples/` directory:
+
+| Example | Path | Description |
+|---------|------|-------------|
+| **Bookshop (primary DB)** | `examples/cap-svc/` | Snowflake is the only DB. Standard CAP projections — no custom handler needed. Includes CSV seed data and a local SQLite dev profile. |
+| **Analytics (secondary DB)** | `examples/snowflake-secondary-db/` | HANA is the primary DB; Snowflake is a named secondary service for read-only analytics. Mirrors the pattern used in production apps. |
+
+Each example has its own `README.md` with setup steps.
 
 ---
 
