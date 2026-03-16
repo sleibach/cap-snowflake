@@ -1,8 +1,13 @@
 namespace Snowflake;
 
-/** VECTOR column — maps to VECTOR(FLOAT, n) DDL */
+/**
+ * Optional override for a cds.Vector element.
+ * Use cds.Vector(n) as the element type — that already maps to VECTOR(FLOAT, n).
+ * This annotation is only needed to change the default similarity function
+ * used by vectorSearch, or to override the dimension count.
+ */
 annotation vector {
-  dimensions : Integer;
+  dimensions : Integer;  // overrides the dimension from Vector(n); default 1536
   similarity : String enum { COSINE; DOT_PRODUCT; EUCLIDEAN; } default 'COSINE';
 }
 

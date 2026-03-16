@@ -177,6 +177,15 @@ describe('mapCDSType: VECTOR', () => {
     assert.strictEqual(mapCDSType('vector'), 'VECTOR(FLOAT, 1536)');
   });
 
+  it('uses length as dimensions when vectorConfig is absent (native cds.Vector)', () => {
+    assert.strictEqual(mapCDSType('cds.Vector', 768), 'VECTOR(FLOAT, 768)');
+    assert.strictEqual(mapCDSType('cds.Vector', 1536), 'VECTOR(FLOAT, 1536)');
+  });
+
+  it('vectorConfig dimensions take precedence over length', () => {
+    assert.strictEqual(mapCDSType('vector', 768, undefined, undefined, { dimensions: 512 }), 'VECTOR(FLOAT, 512)');
+  });
+
   it('uses custom dimensions', () => {
     assert.strictEqual(mapCDSType('vector', undefined, undefined, undefined, { dimensions: 768 }), 'VECTOR(FLOAT, 768)');
   });
@@ -187,7 +196,31 @@ describe('mapCDSType: VECTOR', () => {
   });
 });
 
-// ─── 3. buildSnowflakeAnnotationStatements ────────────────────────────────────
+// ─── 3. generateColumnDefinition: native cds.Vector ──────────────────────────
+import { generateColumnDefinition } from '../../src/ddl/deploy.js';
+
+describe('generateColumnDefinition: native cds.Vector type', () => {
+  it('creates VECTOR column from native cds.Vector type with length as dimensions', () => {
+    const sql = generateColumnDefinition('embedding', { type: 'cds.Vector', length: 768 });
+    assert.ok(sql.includes('VECTOR(FLOAT, 768)'), `Expected VECTOR(FLOAT, 768), got: ${sql}`);
+  });
+
+  it('defaults to 1536 dimensions when cds.Vector has no length', () => {
+    const sql = generateColumnDefinition('embedding', { type: 'cds.Vector' });
+    assert.ok(sql.includes('VECTOR(FLOAT, 1536)'), `Expected VECTOR(FLOAT, 1536), got: ${sql}`);
+  });
+
+  it('@Snowflake.vector annotation dimensions override cds.Vector length', () => {
+    const sql = generateColumnDefinition('embedding', {
+      type: 'cds.Vector',
+      length: 768,
+      vectorConfig: { dimensions: 512 },
+    });
+    assert.ok(sql.includes('VECTOR(FLOAT, 512)'), `Expected annotation dimensions to win, got: ${sql}`);
+  });
+});
+
+// ─── 4. buildSnowflakeAnnotationStatements ────────────────────────────────────
 import { buildSnowflakeAnnotationStatements, generateExternalTable } from '../../src/ddl/deploy.js';
 
 const mockCreds = { account: 'acct', database: 'DB', schema: 'SCH', warehouse: 'WH', auth: 'password' as const };

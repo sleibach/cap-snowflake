@@ -23,7 +23,7 @@ export function mapCDSType(
 
   switch (normalizedType) {
     case 'vector':
-      return `VECTOR(FLOAT, ${vectorConfig?.dimensions ?? 1536})`;
+      return `VECTOR(FLOAT, ${vectorConfig?.dimensions ?? length ?? 1536})`;
     case 'string':
       return length ? `VARCHAR(${length})` : 'VARCHAR(5000)';
     

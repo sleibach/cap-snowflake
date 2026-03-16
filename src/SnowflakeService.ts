@@ -776,14 +776,14 @@ export class SnowflakeService extends cds.DatabaseService {
     let vectorCol: string | undefined;
     const elements: Record<string, any> = entityDef.elements ?? {};
     for (const [name, el] of Object.entries(elements)) {
-      if (getVectorConfig(el)) {
+      if (getVectorConfig(el) || /^cds\.vector$/i.test((el as any).type ?? '')) {
         vectorCol = name.toUpperCase();
         break;
       }
     }
 
     if (!vectorCol) {
-      return req.reject(400, `Entity '${entity}' has no @Snowflake.vector element`);
+      return req.reject(400, `Entity '${entity}' has no vector element (cds.Vector type or @Snowflake.vector annotation)`);
     }
 
     const { qualifyName: qualify } = await import('./identifiers.js');

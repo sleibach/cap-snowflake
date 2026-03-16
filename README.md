@@ -434,13 +434,13 @@ The annotation vocabulary is defined in `src/annotations/snowflake.cds`. No addi
 
 ### VECTOR Type and Similarity Search
 
-Mark a column as a Snowflake VECTOR column for storing machine-learning embeddings:
+Use the standard CDS `Vector(n)` type to store machine-learning embeddings. The dimension count is specified as the type parameter — no extra annotation required:
 
 ```cds
 entity EmbeddedDocs {
   key ID      : UUID;
   content     : String;
-  embedding   : String  @Snowflake.vector: { dimensions: 1536, similarity: 'COSINE' };
+  embedding   : Vector(1536);
 }
 ```
 
@@ -450,10 +450,20 @@ entity EmbeddedDocs {
 EMBEDDING VECTOR(FLOAT, 1536)
 ```
 
+The `@Snowflake.vector` annotation is **optional** and only needed to override the default similarity function used by `vectorSearch`:
+
+```cds
+entity EmbeddedDocs {
+  key ID      : UUID;
+  content     : String;
+  embedding   : Vector(768) @Snowflake.vector: { similarity: 'DOT_PRODUCT' };
+}
+```
+
 **Supported similarity functions:**
 
-| Annotation value | Snowflake function |
-|------------------|--------------------|
+| `similarity` value | Snowflake function |
+|--------------------|--------------------|
 | `COSINE` (default) | `VECTOR_COSINE_SIMILARITY` |
 | `DOT_PRODUCT` | `VECTOR_INNER_PRODUCT` |
 | `EUCLIDEAN` | `VECTOR_L2_DISTANCE` |
@@ -691,7 +701,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS "DB"."SCHEMA"."RAWEVENTS"
 | `Binary` | `BINARY` | |
 | `Array` | `ARRAY` | |
 | `Json` | `VARIANT` | |
-| *(custom)* `@Snowflake.vector` | `VECTOR(FLOAT, n)` | Dimension count from annotation |
+| `Vector(n)` | `VECTOR(FLOAT, n)` | n = dimension count; `@Snowflake.vector` annotation optional |
 
 ---
 

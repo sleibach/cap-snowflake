@@ -529,7 +529,9 @@ function toEntityDefinition(name: string, definition: CSNDefinition, entityName?
       defaultVal = DRAFT_BOOL_DEFAULTS[elementName];
     }
 
-    const vectorCfg = getVectorConfig(element);
+    const annotationCfg = getVectorConfig(element);
+    const isNativeCdsVector = /^cds\.vector$/i.test(element.type ?? '');
+    const vectorCfg = annotationCfg ?? (isNativeCdsVector ? { dimensions: element.length ?? 1536, similarity: 'COSINE' } : undefined);
     mappedElements[elementName] = {
       type: vectorCfg ? 'vector' : element.type,
       length: element.length,
