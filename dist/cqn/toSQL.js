@@ -276,24 +276,18 @@ function processColumnsWithExpand(columns, from, credentials, _params, baseTarge
                     withinGroup = ` WITHIN GROUP (ORDER BY ${orderClauses})`;
                 }
                 let subQuery;
-                if (expandLimit || expandSkip) {
-                    // For LIMIT/OFFSET, put ORDER BY inside the inner subquery (not WITHIN GROUP)
-                    // so that OFFSET skips the correct rows after ordering.
-                    let innerOrder = '';
-                    if (expandOrderBy && expandOrderBy.length > 0) {
-                        const orderClauses = expandOrderBy.map((item) => {
-                            const colPart = item.ref ? item.ref.map((p) => toPhysicalIdentifier(p)).join('.') : String(item);
-                            const dir = item.sort ? ` ${item.sort.toUpperCase()}` : '';
-                            return `${colPart}${dir}`;
-                        }).join(', ');
-                        innerOrder = ` ORDER BY ${orderClauses}`;
-                    }
-                    // Snowflake requires LIMIT before OFFSET — use a very large limit when
-                    // only $skip is specified (meaning "all rows starting from offset N").
-                    const limitClause = expandLimit ? ` LIMIT ${expandLimit}`
-                        : (expandSkip ? ' LIMIT 2147483647' : '');
-                    const offsetClause = expandSkip ? ` OFFSET ${expandSkip}` : '';
-                    subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID${innerOrder}${limitClause}${offsetClause}) AS tm`;
+                if (expandSkip) {
+                    // $skip (with optional $top): use ARRAY_SLICE on the fully-ordered aggregate.
+                    // A derived-table approach with ORDER BY + OFFSET fails for correlated
+                    // subqueries in Snowflake because the correlated outer reference (base.ID)
+                    // is not visible inside the derived table when ORDER BY is present.
+                    // ARRAY_SLICE(agg, start, end) avoids that limitation entirely.
+                    const startIdx = expandSkip;
+                    const endIdx = expandLimit ? expandSkip + expandLimit : 2147483647;
+                    subQuery = `SELECT COALESCE(ARRAY_SLICE(ARRAY_AGG(${objConstruct})${withinGroup}, ${startIdx}, ${endIdx}), ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
+                }
+                else if (expandLimit) {
+                    subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID LIMIT ${expandLimit}) AS tm`;
                 }
                 else {
                     subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
@@ -323,19 +317,34 @@ function processColumnsWithExpand(columns, from, credentials, _params, baseTarge
                     const targetTable = qualifyName(targetEntity, credentials);
                     const targetKey = resolveTargetKey(baseTarget, assocName);
                     let joinCondition = `${baseAlias}.${toPhysicalIdentifier(foreignKey)} = ${joinAlias}.${toPhysicalIdentifier(targetKey)}`;
-                    const expandWhere = col.where;
-                    if (expandWhere && expandWhere.length > 0) {
-                        const extraWhere = translateFilter(expandWhere, _params);
-                        if (extraWhere)
-                            joinCondition += ` AND ${extraWhere}`;
-                    }
-                    joins.push(`LEFT JOIN ${targetTable} AS ${joinAlias} ON ${joinCondition}`);
                     // Look up the CDS definition for the expand target using the original
                     // association target name (not the physical table name) so that element
                     // metadata (for wildcard expand handling) is available.
                     const assocCDSTarget = baseTarget?.elements?.[assocName]?.target;
                     const targetDef = getDefinitionForEntity(assocCDSTarget) || getDefinitionForEntity(targetEntity);
-                    collectNestedExpandColumns(expandSpec, assocName, joinAlias, joins, expandColumns, credentials, () => `expand_${joinCounter++}`, targetDef, _params);
+                    // PARAM ORDERING: expandColumns (SELECT) appear before joins (FROM) in the
+                    // final SQL, so any `?` inside nested expand columns must be pushed to _params
+                    // BEFORE the `?` from the JOIN WHERE condition — otherwise positional binding
+                    // maps parameters to the wrong placeholders.
+                    // Collect nested expand columns + their params into temporary arrays first.
+                    const nestedParams = [];
+                    const nestedJoins = [];
+                    const nestedExpandCols = [];
+                    collectNestedExpandColumns(expandSpec, assocName, joinAlias, nestedJoins, nestedExpandCols, credentials, () => `expand_${joinCounter++}`, targetDef, nestedParams);
+                    // NOW translate the JOIN WHERE condition (its params belong after SELECT params).
+                    const expandWhere = col.where;
+                    const joinWhereParams = [];
+                    if (expandWhere && expandWhere.length > 0) {
+                        const extraWhere = translateFilter(expandWhere, joinWhereParams);
+                        if (extraWhere)
+                            joinCondition += ` AND ${extraWhere}`;
+                    }
+                    // Add parent JOIN first (must precede nested JOINs referencing it).
+                    joins.push(`LEFT JOIN ${targetTable} AS ${joinAlias} ON ${joinCondition}`);
+                    joins.push(...nestedJoins);
+                    expandColumns.push(...nestedExpandCols);
+                    // Merge params: nested expand first (for SELECT ?s), then JOIN WHERE (for FROM ?s).
+                    _params.push(...nestedParams, ...joinWhereParams);
                 }
             }
         }
@@ -507,7 +516,10 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
             const nestedTargetName = resolveAssociationTargetName(parentTarget, nestedAssoc)
                 || (nestedAssoc.charAt(0).toUpperCase() + nestedAssoc.slice(1));
             const nestedTable = qualifyName(nestedTargetName, credentials);
-            const nestedTargetDef = getDefinitionForEntity(nestedTargetName);
+            // resolveAssociationTargetName returns the physical name (e.g. 'CAP_E2E_BOOKS').
+            // For the CDS definition lookup we need the logical name (e.g. 'E2ETestService.Books').
+            const nestedAssocCDSTarget = parentTarget?.elements?.[nestedAssoc]?.target;
+            const nestedTargetDef = getDefinitionForEntity(nestedAssocCDSTarget) || getDefinitionForEntity(nestedTargetName);
             if (isLikelyToMany(nestedAssoc, parentTarget)) {
                 // To-many nested expand: use ARRAY_AGG correlated subquery
                 const expandSpec = col.expand;
@@ -516,20 +528,13 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
                 // We need the FK name in the child table. Use heuristic: singularize(parentTarget name) + _ID
                 const parentEntityShortName = (parentTarget?.name ?? '').split('.').pop() ?? '';
                 const childFKCol = toPhysicalIdentifier(parentEntityShortName ? `${singularize(parentEntityShortName)}_ID` : 'ID');
-                // Build OBJECT_CONSTRUCT for the nested records
-                const isWildcard = !expandSpec || expandSpec.length === 0 || (expandSpec.length === 1 && expandSpec[0] === '*') || (expandSpec.length === 1 && expandSpec[0].ref?.[0] === '*');
+                // Build OBJECT_CONSTRUCT for the nested records.
+                // Prefer the entity definition when available: it provides the correct CDS element
+                // names (camelCase) as keys, which is what calling code expects. Deriving keys from
+                // the expand spec is unreliable because CAP may inject draft columns (e.g. '*' plus
+                // {ref:['DraftAdministrativeData']}) which causes only non-scalar refs to be listed.
                 let objConstruct;
-                if (!isWildcard && expandSpec.some(c => c.ref)) {
-                    const pairs = expandSpec
-                        .filter((c) => c.ref)
-                        .map((c) => {
-                        const cdsName = c.ref[0];
-                        return `'${cdsName}', ${toPhysicalIdentifier(cdsName)}`;
-                    })
-                        .join(', ');
-                    objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
-                }
-                else if (nestedTargetDef?.elements) {
+                if (nestedTargetDef?.elements) {
                     const pairs = Object.entries(nestedTargetDef.elements)
                         .filter(([, el]) => !el.isAssociation && !el.virtual && el['@cds.persistence.skip'] !== true)
                         .map(([elName]) => `'${elName}', ${toPhysicalIdentifier(elName)}`)
@@ -537,7 +542,22 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
                     objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
                 }
                 else {
-                    objConstruct = 'OBJECT_CONSTRUCT(*)';
+                    // No entity definition — fall back to explicit scalar refs from expand spec or *
+                    const isWildcard = !expandSpec || expandSpec.length === 0
+                        || expandSpec.some((c) => c === '*' || c.ref?.[0] === '*');
+                    if (!isWildcard) {
+                        const pairs = expandSpec
+                            .filter((c) => c.ref && !c.expand) // scalar refs only, not sub-expands
+                            .map((c) => {
+                            const cdsName = c.ref[0];
+                            return `'${cdsName}', ${toPhysicalIdentifier(cdsName)}`;
+                        })
+                            .join(', ');
+                        objConstruct = pairs ? `OBJECT_CONSTRUCT(${pairs})` : 'OBJECT_CONSTRUCT(*)';
+                    }
+                    else {
+                        objConstruct = 'OBJECT_CONSTRUCT(*)';
+                    }
                 }
                 // Apply any $filter from the expand option (e.g. $expand=books($filter=price gt 30))
                 const nestedWhere = col.where;
