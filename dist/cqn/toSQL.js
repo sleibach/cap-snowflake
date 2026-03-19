@@ -288,7 +288,10 @@ function processColumnsWithExpand(columns, from, credentials, _params, baseTarge
                         }).join(', ');
                         innerOrder = ` ORDER BY ${orderClauses}`;
                     }
-                    const limitClause = expandLimit ? ` LIMIT ${expandLimit}` : '';
+                    // Snowflake requires LIMIT before OFFSET — use a very large limit when
+                    // only $skip is specified (meaning "all rows starting from offset N").
+                    const limitClause = expandLimit ? ` LIMIT ${expandLimit}`
+                        : (expandSkip ? ' LIMIT 2147483647' : '');
                     const offsetClause = expandSkip ? ` OFFSET ${expandSkip}` : '';
                     subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID${innerOrder}${limitClause}${offsetClause}) AS tm`;
                 }
@@ -536,7 +539,15 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
                 else {
                     objConstruct = 'OBJECT_CONSTRUCT(*)';
                 }
-                const subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM ${nestedTable} AS tm WHERE tm.${childFKCol} = ${parentAlias}.ID`;
+                // Apply any $filter from the expand option (e.g. $expand=books($filter=price gt 30))
+                const nestedWhere = col.where;
+                let nestedWhereSQL = `tm.${childFKCol} = ${parentAlias}.ID`;
+                if (nestedWhere && nestedWhere.length > 0) {
+                    const extraWhere = translateFilter(nestedWhere, params);
+                    if (extraWhere)
+                        nestedWhereSQL += ` AND ${extraWhere}`;
+                }
+                const subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM ${nestedTable} AS tm WHERE ${nestedWhereSQL}`;
                 expandColumns.push(`(${subQuery}) AS ${quoteIdentifier(`${pathPrefix}__${nestedAssoc}`)}`);
             }
             else {
