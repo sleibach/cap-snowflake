@@ -263,6 +263,7 @@ function processColumnsWithExpand(columns, from, credentials, _params, baseTarge
                 }
                 // COALESCE ensures an empty array [] is returned instead of NULL when no rows match.
                 const expandLimit = col.limit?.rows?.val;
+                const expandSkip = col.limit?.offset?.val;
                 const expandOrderBy = col.orderBy;
                 // Build WITHIN GROUP (ORDER BY ...) clause for ARRAY_AGG if orderBy present
                 let withinGroup = '';
@@ -275,8 +276,21 @@ function processColumnsWithExpand(columns, from, credentials, _params, baseTarge
                     withinGroup = ` WITHIN GROUP (ORDER BY ${orderClauses})`;
                 }
                 let subQuery;
-                if (expandLimit) {
-                    subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID LIMIT ${expandLimit}) AS tm`;
+                if (expandLimit || expandSkip) {
+                    // For LIMIT/OFFSET, put ORDER BY inside the inner subquery (not WITHIN GROUP)
+                    // so that OFFSET skips the correct rows after ordering.
+                    let innerOrder = '';
+                    if (expandOrderBy && expandOrderBy.length > 0) {
+                        const orderClauses = expandOrderBy.map((item) => {
+                            const colPart = item.ref ? item.ref.map((p) => toPhysicalIdentifier(p)).join('.') : String(item);
+                            const dir = item.sort ? ` ${item.sort.toUpperCase()}` : '';
+                            return `${colPart}${dir}`;
+                        }).join(', ');
+                        innerOrder = ` ORDER BY ${orderClauses}`;
+                    }
+                    const limitClause = expandLimit ? ` LIMIT ${expandLimit}` : '';
+                    const offsetClause = expandSkip ? ` OFFSET ${expandSkip}` : '';
+                    subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct}), ARRAY_CONSTRUCT()) FROM (SELECT * FROM ${targetTable} AS tmsub WHERE tmsub.${toPhysicalIdentifier(parentFK)} = ${baseAlias}.ID${innerOrder}${limitClause}${offsetClause}) AS tm`;
                 }
                 else {
                     subQuery = `SELECT COALESCE(ARRAY_AGG(${objConstruct})${withinGroup}, ARRAY_CONSTRUCT()) FROM ${targetTable} AS tm WHERE ${subWhere}`;
@@ -459,6 +473,19 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
             expandColumns.push(`${parentAlias}.*`);
         }
         return;
+    }
+    // If no column in the spec is a plain scalar ref (all entries are sub-expands or
+    // expressions), the caller supplied only nested expands (e.g. $expand=author($expand=books)).
+    // In that case we must also SELECT all scalar fields of the join-ed entity, otherwise the
+    // parent object will exist in the result but every scalar property will be undefined.
+    const hasScalarRefs = columns.some((c) => c.ref && !c.expand && !c.xpr);
+    if (!hasScalarRefs && parentTarget?.elements) {
+        for (const [elName, el] of Object.entries(parentTarget.elements)) {
+            if (el.virtual || el.target)
+                continue;
+            const physName = el['@cds.persistence.name'] ?? toPhysicalIdentifier(elName);
+            expandColumns.push(`${parentAlias}.${physName} AS ${quoteIdentifier(`${pathPrefix}__${elName}`)}`);
+        }
     }
     for (const col of columns) {
         // Handle xpr (expression) columns — e.g. lean-draft.js injects CASE expressions
