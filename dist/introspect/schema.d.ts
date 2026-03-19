@@ -35,7 +35,11 @@ export interface TableMetadata {
     foreignKeys: ForeignKeyInfo[];
 }
 /**
- * Schema introspection class
+ * Schema introspection class.
+ *
+ * Uses three batch queries against INFORMATION_SCHEMA (one per schema, not one
+ * per table) so that a schema with N tables requires exactly 3 round-trips
+ * regardless of N.
  */
 export declare class SnowflakeSchemaIntrospector {
     private credentials;
@@ -47,25 +51,33 @@ export declare class SnowflakeSchemaIntrospector {
      */
     connect(): Promise<void>;
     /**
-     * Introspect schema and get all tables
+     * Introspect schema and get all tables.
+     *
+     * Performs exactly 4 SQL queries total (tables + 3 batch metadata queries),
+     * regardless of the number of tables in the schema.
      */
     introspectSchema(schemaName?: string): Promise<SchemaDefinition>;
     /**
-     * Get all tables in schema
+     * Get all tables and views in the schema.
      */
     private getTables;
     /**
-     * Get columns for a table
+     * Fetch all columns for the entire schema in one query.
+     * Returns a map from table name to ordered column rows.
      */
-    private getColumns;
+    private getAllColumns;
     /**
-     * Get primary key columns
+     * Fetch all primary key columns for the entire schema in one query.
+     * Returns a map from table name to ordered PK column names.
      */
-    private getPrimaryKeys;
+    private getAllPrimaryKeys;
     /**
-     * Get foreign keys
+     * Fetch all foreign keys for the entire schema in one query.
+     * Returns a map from table name to FK info records.
+     *
+     * Note: Snowflake does not enforce FKs, but they can be defined for metadata.
      */
-    private getForeignKeys;
+    private getAllForeignKeys;
     /**
      * Execute SQL query
      */

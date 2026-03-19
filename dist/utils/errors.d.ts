@@ -14,6 +14,12 @@ export declare class SnowflakeError extends Error {
  */
 export declare function normalizeError(error: any): Error;
 /**
+ * Check if a Snowflake error indicates that an object already exists.
+ * Uses Snowflake error code 002002 as the primary signal; falls back to
+ * message text for errors that bypass the SDK normalisation path.
+ */
+export declare function isAlreadyExistsError(error: unknown): boolean;
+/**
  * Check if error is retryable
  */
 export declare function isRetryableError(error: any): boolean;

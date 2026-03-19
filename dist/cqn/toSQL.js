@@ -2,6 +2,7 @@
  * Main CQN to SQL translator
  */
 import { quoteIdentifier, qualifyName, toPhysicalIdentifier } from '../identifiers.js';
+import { logWarning } from '../utils/logger.js';
 import { placeholder } from '../params.js';
 import { translateFilter, translateSearch } from './filters.js';
 import { translateOrderBy } from './orderby.js';
@@ -430,7 +431,12 @@ function collectNullExpandColumns(columns, pathPrefix, expandColumns) {
         }
     }
 }
-function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, expandColumns, credentials, nextAlias, parentTarget, params = []) {
+const MAX_EXPAND_DEPTH = 8;
+function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, expandColumns, credentials, nextAlias, parentTarget, params = [], depth = 0) {
+    if (depth >= MAX_EXPAND_DEPTH) {
+        logWarning(`Max expand depth (${MAX_EXPAND_DEPTH}) reached — stopping recursion at: ${pathPrefix}`);
+        return;
+    }
     // If expand columns is a wildcard, expand all physical columns of the target entity.
     if (columns.length === 1 && columns[0] === '*') {
         if (parentTarget?.elements) {
@@ -512,7 +518,7 @@ function collectNestedExpandColumns(columns, pathPrefix, parentAlias, joins, exp
                 const nestedFK = resolveForeignKey(parentTarget, nestedAssoc);
                 const nestedTargetKey = resolveTargetKey(parentTarget, nestedAssoc);
                 joins.push(`LEFT JOIN ${nestedTable} AS ${nestedAlias} ON ${parentAlias}.${toPhysicalIdentifier(nestedFK)} = ${nestedAlias}.${toPhysicalIdentifier(nestedTargetKey)}`);
-                collectNestedExpandColumns(col.expand, `${pathPrefix}__${nestedAssoc}`, nestedAlias, joins, expandColumns, credentials, nextAlias, nestedTargetDef, params);
+                collectNestedExpandColumns(col.expand, `${pathPrefix}__${nestedAssoc}`, nestedAlias, joins, expandColumns, credentials, nextAlias, nestedTargetDef, params, depth + 1);
             }
             continue;
         }

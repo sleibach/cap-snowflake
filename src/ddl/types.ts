@@ -99,15 +99,17 @@ export function mapSnowflakeTypeToCDS(snowflakeType: string): string {
   }
   
   if (normalized.startsWith('NUMBER')) {
-    // Parse precision/scale if present
-    const match = normalized.match(/NUMBER\((\d+),(\d+)\)/);
-    if (match) {
-      const scale = parseInt(match[2]);
-      if (scale === 0) {
-        return 'cds.Integer';
-      }
-      return 'cds.Decimal';
+    // Case 1: NUMBER(precision, scale)
+    const matchPS = normalized.match(/NUMBER\((\d+),\s*(\d+)\)/);
+    if (matchPS) {
+      return parseInt(matchPS[2]) === 0 ? 'cds.Integer' : 'cds.Decimal';
     }
+    // Case 2: NUMBER(precision) — no scale — treat as integer; use Integer64 for large precision
+    const matchP = normalized.match(/NUMBER\((\d+)\)/);
+    if (matchP) {
+      return parseInt(matchP[1]) > 18 ? 'cds.Integer64' : 'cds.Integer';
+    }
+    // Case 3: bare NUMBER — default integer semantics
     return 'cds.Integer';
   }
   
@@ -141,6 +143,12 @@ export function mapSnowflakeTypeToCDS(snowflakeType: string): string {
   
   if (normalized === 'VARIANT' || normalized === 'OBJECT') {
     return 'cds.Json';
+  }
+
+  // VECTOR(FLOAT, N) — Snowflake native vector type used for ML embeddings
+  if (normalized.startsWith('VECTOR')) {
+    const m = normalized.match(/VECTOR\s*\([^,]+,\s*(\d+)\s*\)/);
+    return m ? `cds.Vector(${m[1]})` : 'cds.Vector';
   }
 
   return 'cds.String'; // Default fallback

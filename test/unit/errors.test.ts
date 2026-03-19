@@ -3,7 +3,7 @@
  */
 
 import { expect } from 'chai';
-import { SnowflakeError, normalizeError, isRetryableError } from '../../src/utils/errors.js';
+import { SnowflakeError, normalizeError, isRetryableError, isAlreadyExistsError } from '../../src/utils/errors.js';
 import { logWarning, logInfo } from '../../src/utils/logger.js';
 
 describe('SnowflakeError', () => {
@@ -80,6 +80,29 @@ describe('isRetryableError', () => {
 
   it('returns false for generic error', () => {
     expect(isRetryableError(new Error('generic'))).to.be.false;
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('isAlreadyExistsError', () => {
+  it('detects Snowflake error code 002002 (string)', () => {
+    expect(isAlreadyExistsError({ code: '002002', message: 'Object already exists' })).to.be.true;
+  });
+
+  it('detects Snowflake error code 2002 (number)', () => {
+    expect(isAlreadyExistsError({ code: 2002, message: 'Object already exists' })).to.be.true;
+  });
+
+  it('falls back to message text when code is absent', () => {
+    expect(isAlreadyExistsError({ message: 'Table BOOKS already exists' })).to.be.true;
+    expect(isAlreadyExistsError({ message: 'Object ALREADY EXISTS in schema' })).to.be.true;
+  });
+
+  it('returns false for unrelated errors', () => {
+    expect(isAlreadyExistsError({ code: '000000', message: 'Syntax error' })).to.be.false;
+    expect(isAlreadyExistsError(new Error('Connection refused'))).to.be.false;
+    expect(isAlreadyExistsError(null)).to.be.false;
+    expect(isAlreadyExistsError(undefined)).to.be.false;
   });
 });
 

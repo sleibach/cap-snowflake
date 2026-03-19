@@ -52,6 +52,7 @@ describe('Schema Introspection', () => {
       const cdsModel = generateCDSModel(schemaDefinition, 'test');
 
       expect(cdsModel).to.include('namespace test;');
+      expect(cdsModel).to.include("@cds.persistence.name: 'BOOKS'");
       expect(cdsModel).to.include('entity Books {');
       expect(cdsModel).to.include('key id : String');
       expect(cdsModel).to.include('title : String(100) @mandatory');
@@ -210,6 +211,119 @@ describe('Schema Introspection', () => {
       expect(cdsModel).to.include('jsonCol : Json');
       expect(cdsModel).to.include('arrayCol : Array');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('generateColumnDefinition — VECTOR type', () => {
+  it('should map VECTOR(FLOAT, 1536) to Vector(1536) in generated CDS', () => {
+    const schemaDefinition: SchemaDefinition = {
+      tables: new Map([
+        [
+          'EMBEDDINGS',
+          {
+            info: { tableName: 'EMBEDDINGS', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' },
+            columns: [
+              { columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true },
+              { columnName: 'EMBEDDING', dataType: 'VECTOR(FLOAT, 1536)', isNullable: true, isPrimaryKey: false },
+            ],
+            primaryKeys: ['ID'],
+            foreignKeys: [],
+          } as TableMetadata,
+        ],
+      ]),
+    };
+
+    const cdsModel = generateCDSModel(schemaDefinition, 'test');
+    expect(cdsModel).to.include('embedding : Vector(1536)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('generateEntityDefinition — @cds.persistence.name', () => {
+  it('should always emit @cds.persistence.name with original table name', () => {
+    const schemaDefinition: SchemaDefinition = {
+      tables: new Map([
+        [
+          'MY_CUSTOM_TABLE',
+          {
+            info: { tableName: 'MY_CUSTOM_TABLE', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' },
+            columns: [
+              { columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true },
+            ],
+            primaryKeys: ['ID'],
+            foreignKeys: [],
+          } as TableMetadata,
+        ],
+      ]),
+    };
+
+    const cdsModel = generateCDSModel(schemaDefinition, 'test');
+    expect(cdsModel).to.include("@cds.persistence.name: 'MY_CUSTOM_TABLE'");
+    expect(cdsModel).to.include('entity MyCustomTable {');
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('@Aggregation.default on FACT tables', () => {
+  it('should annotate numeric columns on FACT tables with @Aggregation.default: #SUM', () => {
+    const schemaDefinition: SchemaDefinition = {
+      tables: new Map([
+        [
+          'SALES_FACT',
+          {
+            info: { tableName: 'SALES_FACT', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' },
+            columns: [
+              { columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true },
+              { columnName: 'AMOUNT', dataType: 'NUMBER(15,2)', isNullable: true, isPrimaryKey: false, numericPrecision: 15, numericScale: 2 },
+              { columnName: 'UNITS', dataType: 'NUMBER(10,0)', isNullable: true, isPrimaryKey: false, numericPrecision: 10, numericScale: 0 },
+              { columnName: 'DESCRIPTION', dataType: 'VARCHAR(500)', isNullable: true, isPrimaryKey: false },
+            ],
+            primaryKeys: ['ID'],
+            foreignKeys: [
+              { constraintName: 'FK_DIM0', columnName: 'DIM0_ID', referencedTable: 'DIM0', referencedColumn: 'ID' },
+              { constraintName: 'FK_DIM1', columnName: 'DIM1_ID', referencedTable: 'DIM1', referencedColumn: 'ID' },
+              { constraintName: 'FK_DIM2', columnName: 'DIM2_ID', referencedTable: 'DIM2', referencedColumn: 'ID' },
+            ],
+          } as TableMetadata,
+        ],
+        ['DIM0', { info: { tableName: 'DIM0', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' }, columns: [{ columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true }], primaryKeys: ['ID'], foreignKeys: [] } as TableMetadata],
+        ['DIM1', { info: { tableName: 'DIM1', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' }, columns: [{ columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true }], primaryKeys: ['ID'], foreignKeys: [] } as TableMetadata],
+        ['DIM2', { info: { tableName: 'DIM2', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' }, columns: [{ columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true }], primaryKeys: ['ID'], foreignKeys: [] } as TableMetadata],
+      ]),
+    };
+
+    const cdsModel = generateCDSModel(schemaDefinition, 'test');
+    // Numeric measure columns should be annotated
+    expect(cdsModel).to.include('@Aggregation.default: #SUM');
+    // String column should NOT be annotated
+    const descriptionIdx = cdsModel.indexOf('description : String');
+    const aggregationIdx = cdsModel.lastIndexOf('@Aggregation.default: #SUM', descriptionIdx);
+    // The annotation before description should be for amount or units, not description itself
+    const descriptionLineHasAnnotation = cdsModel.includes('@Aggregation.default: #SUM\n  description');
+    expect(descriptionLineHasAnnotation).to.equal(false);
+  });
+
+  it('should NOT annotate numeric columns on non-FACT tables', () => {
+    const schemaDefinition: SchemaDefinition = {
+      tables: new Map([
+        [
+          'PLAIN_TABLE',
+          {
+            info: { tableName: 'PLAIN_TABLE', tableSchema: 'PUBLIC', tableType: 'BASE TABLE' },
+            columns: [
+              { columnName: 'ID', dataType: 'VARCHAR(36)', isNullable: false, isPrimaryKey: true },
+              { columnName: 'AMOUNT', dataType: 'NUMBER(15,2)', isNullable: true, isPrimaryKey: false, numericPrecision: 15, numericScale: 2 },
+            ],
+            primaryKeys: ['ID'],
+            foreignKeys: [],
+          } as TableMetadata,
+        ],
+      ]),
+    };
+
+    const cdsModel = generateCDSModel(schemaDefinition, 'test');
+    expect(cdsModel).to.not.include('@Aggregation.default:');
   });
 });
 

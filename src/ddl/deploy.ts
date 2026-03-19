@@ -28,6 +28,7 @@ import {
   getTags,
   getExternalTableConfig,
 } from '../features/snowflake-native.js';
+import { logWarning } from '../utils/logger.js';
 
 export interface EntityDefinition {
   name: string;
@@ -231,8 +232,12 @@ export function buildDeployStatements(
         }
       }
     }
-  } catch {
-    // Ignore compile errors — draft tables simply won't be generated
+  } catch (compileError: any) {
+    logWarning(
+      'cds.compile.for.sql() failed — draft tables will not be generated. ' +
+      'Runtime failures possible for @odata.draft.enabled entities.',
+      { error: compileError?.message ?? String(compileError) }
+    );
   }
   const statements: string[] = [];
   const createViews = options.createViews !== false;

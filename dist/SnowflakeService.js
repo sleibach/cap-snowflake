@@ -9,8 +9,8 @@ import { SnowflakeSDKClient } from './client/sdk.js';
 import { cqnToSQL, generateMerge, resolveEntityName } from './cqn/toSQL.js';
 import { qualifyName, toPhysicalIdentifier } from './identifiers.js';
 import { wrapWithCount, stripPagination } from './cqn/pagination.js';
-import { logInfo, logError, logWarning, logDebug } from './utils/logger.js';
-import { normalizeError } from './utils/errors.js';
+import { logInfo, logError, logWarning, logDebug, logSQL } from './utils/logger.js';
+import { normalizeError, isAlreadyExistsError } from './utils/errors.js';
 import { buildDeployStatements } from './ddl/deploy.js';
 import { isTemporal, getTemporalFields } from './features/temporal.js';
 import { parseTimeTravelHeader, injectTimeTravelClause } from './features/time-travel.js';
@@ -566,10 +566,7 @@ export class SnowflakeService extends cds.DatabaseService {
      * Execute SQL statement
      */
     async execute(sql, params) {
-        if (process.env.DEBUG_SQL) {
-            const { appendFileSync } = await import('node:fs');
-            appendFileSync('/tmp/sql-debug.log', `[SQL] ${sql}\n[P] ${JSON.stringify(params)}\n\n`);
-        }
+        logSQL(sql, params);
         if (this.sqlApiClient) {
             const result = await this.sqlApiClient.execute(sql, params);
             return SnowflakeSQLAPIClient.parseRows(result);
@@ -604,6 +601,9 @@ export class SnowflakeService extends cds.DatabaseService {
         if (this.inTransaction) {
             logDebug('transaction already in progress, begin() is a no-op', { contextId: cds.context?.id ?? 'default' });
             return;
+        }
+        if (this.transactionStates.size > 500) {
+            logWarning(`transactionStates map has ${this.transactionStates.size} entries — possible context ID leak`);
         }
         try {
             if (this.sdkClient) {
@@ -711,13 +711,13 @@ export class SnowflakeService extends cds.DatabaseService {
         let vectorCol;
         const elements = entityDef.elements ?? {};
         for (const [name, el] of Object.entries(elements)) {
-            if (getVectorConfig(el)) {
+            if (getVectorConfig(el) || /^cds\.vector$/i.test(el.type ?? '')) {
                 vectorCol = name.toUpperCase();
                 break;
             }
         }
         if (!vectorCol) {
-            return req.reject(400, `Entity '${entity}' has no @Snowflake.vector element`);
+            return req.reject(400, `Entity '${entity}' has no vector element (cds.Vector type or @Snowflake.vector annotation)`);
         }
         const { qualifyName: qualify } = await import('./identifiers.js');
         const tableName = entityDef['@cds.persistence.name'] ?? entity.replace(/\./g, '_').toUpperCase();
@@ -759,8 +759,7 @@ export class SnowflakeService extends cds.DatabaseService {
             }
             catch (error) {
                 // Snowflake may return "already exists" for views/tables from previous runs.
-                const message = String(error?.message || '');
-                if (message.includes('already exists')) {
+                if (isAlreadyExistsError(error)) {
                     logWarning('Deploy statement skipped (already exists)', { sql });
                     continue;
                 }

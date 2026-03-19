@@ -82,9 +82,16 @@ describe('Type Mappings', () => {
       expect(mapSnowflakeTypeToCDS('NUMBER(38,0)')).to.equal('cds.Integer');
       expect(mapSnowflakeTypeToCDS('NUMBER(10,2)')).to.equal('cds.Decimal');
       expect(mapSnowflakeTypeToCDS('NUMBER(15)')).to.equal('cds.Integer');
+      expect(mapSnowflakeTypeToCDS('NUMBER(38)')).to.equal('cds.Integer64');
       expect(mapSnowflakeTypeToCDS('NUMBER')).to.equal('cds.Integer');
       expect(mapSnowflakeTypeToCDS('FLOAT')).to.equal('cds.Double');
       expect(mapSnowflakeTypeToCDS('DOUBLE')).to.equal('cds.Double');
+    });
+
+    it('should map VECTOR type with and without dimension', () => {
+      expect(mapSnowflakeTypeToCDS('VECTOR(FLOAT, 1536)')).to.equal('cds.Vector(1536)');
+      expect(mapSnowflakeTypeToCDS('VECTOR(FLOAT, 768)')).to.equal('cds.Vector(768)');
+      expect(mapSnowflakeTypeToCDS('VECTOR')).to.equal('cds.Vector');
     });
 
     it('should map date/time types', () => {

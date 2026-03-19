@@ -7,6 +7,7 @@ import { qualifyName, toPhysicalIdentifier } from '../identifiers.js';
 import { extractLocalizedElements, generateLocalizedView, generateTextsTable, getEntityKeys, hasLocalizedElements } from '../features/localized.js';
 import { generateTemporalTableDDL, generateTemporalView, isTemporal } from '../features/temporal.js';
 import { getVectorConfig, getClusteringKeys, getDataRetentionDays, isSearchOptimized, getMaskingPolicy, getRowAccessPolicy, getTags, getExternalTableConfig, } from '../features/snowflake-native.js';
+import { logWarning } from '../utils/logger.js';
 /**
  * Generate CREATE TABLE statement
  */
@@ -126,8 +127,9 @@ export function buildDeployStatements(model, credentials, options = {}) {
             }
         }
     }
-    catch {
-        // Ignore compile errors — draft tables simply won't be generated
+    catch (compileError) {
+        logWarning('cds.compile.for.sql() failed — draft tables will not be generated. ' +
+            'Runtime failures possible for @odata.draft.enabled entities.', { error: compileError?.message ?? String(compileError) });
     }
     const statements = [];
     const createViews = options.createViews !== false;
@@ -383,7 +385,9 @@ function toEntityDefinition(name, definition, entityName) {
         if (isDraftEntity && defaultVal === undefined && elementName in DRAFT_BOOL_DEFAULTS) {
             defaultVal = DRAFT_BOOL_DEFAULTS[elementName];
         }
-        const vectorCfg = getVectorConfig(element);
+        const annotationCfg = getVectorConfig(element);
+        const isNativeCdsVector = /^cds\.vector$/i.test(element.type ?? '');
+        const vectorCfg = annotationCfg ?? (isNativeCdsVector ? { dimensions: element.length ?? 1536, similarity: 'COSINE' } : undefined);
         mappedElements[elementName] = {
             type: vectorCfg ? 'vector' : element.type,
             length: element.length,

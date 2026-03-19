@@ -60,6 +60,16 @@ function mapSQLStateToHTTP(sqlState) {
     }
 }
 /**
+ * Check if a Snowflake error indicates that an object already exists.
+ * Uses Snowflake error code 002002 as the primary signal; falls back to
+ * message text for errors that bypass the SDK normalisation path.
+ */
+export function isAlreadyExistsError(error) {
+    const e = error;
+    return e?.code === '002002' || e?.code === 2002
+        || String(e?.message ?? '').toLowerCase().includes('already exists');
+}
+/**
  * Check if error is retryable
  */
 export function isRetryableError(error) {

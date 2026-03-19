@@ -6,7 +6,11 @@ import { SnowflakeSDKClient } from '../client/sdk.js';
 import { mapSnowflakeTypeToCDS } from '../ddl/types.js';
 import { logInfo, logWarning } from '../utils/logger.js';
 /**
- * Schema introspection class
+ * Schema introspection class.
+ *
+ * Uses three batch queries against INFORMATION_SCHEMA (one per schema, not one
+ * per table) so that a schema with N tables requires exactly 3 round-trips
+ * regardless of N.
  */
 export class SnowflakeSchemaIntrospector {
     credentials;
@@ -30,39 +34,48 @@ export class SnowflakeSchemaIntrospector {
         }
     }
     /**
-     * Introspect schema and get all tables
+     * Introspect schema and get all tables.
+     *
+     * Performs exactly 4 SQL queries total (tables + 3 batch metadata queries),
+     * regardless of the number of tables in the schema.
      */
     async introspectSchema(schemaName) {
         const schema = schemaName || this.credentials.schema;
         if (!schema) {
             throw new Error('Schema name is required for introspection');
         }
+        // Snowflake INFORMATION_SCHEMA stores schema names in UPPERCASE.
+        // Normalise here so that callers can pass either casing.
+        const normalizedSchema = schema.toUpperCase();
         logInfo(`Introspecting schema: ${schema}`);
-        const tables = await this.getTables(schema);
-        const schemaDefinition = {
-            tables: new Map(),
-        };
+        const tables = await this.getTables(normalizedSchema);
+        if (tables.length === 0) {
+            logInfo(`No tables found in schema: ${schema}`);
+            return { tables: new Map() };
+        }
+        // Batch-fetch all metadata — one query per resource type, not per table
+        const allColumns = await this.getAllColumns(normalizedSchema);
+        const allPrimaryKeys = await this.getAllPrimaryKeys(normalizedSchema);
+        const allForeignKeys = await this.getAllForeignKeys(normalizedSchema);
+        const schemaDefinition = { tables: new Map() };
         for (const table of tables) {
-            logInfo(`Introspecting table: ${table.tableName}`);
-            const columns = await this.getColumns(schema, table.tableName);
-            const primaryKeys = await this.getPrimaryKeys(schema, table.tableName);
-            const foreignKeys = await this.getForeignKeys(schema, table.tableName);
-            schemaDefinition.tables.set(table.tableName, {
+            const tableName = table.tableName;
+            schemaDefinition.tables.set(tableName, {
                 info: table,
-                columns,
-                primaryKeys,
-                foreignKeys,
+                columns: buildColumns(allColumns.get(tableName) ?? [], allPrimaryKeys.get(tableName) ?? []),
+                primaryKeys: allPrimaryKeys.get(tableName) ?? [],
+                foreignKeys: allForeignKeys.get(tableName) ?? [],
             });
         }
         logInfo(`Introspected ${schemaDefinition.tables.size} tables`);
         return schemaDefinition;
     }
     /**
-     * Get all tables in schema
+     * Get all tables and views in the schema.
      */
     async getTables(schemaName) {
         const sql = `
-      SELECT 
+      SELECT
         TABLE_NAME,
         TABLE_SCHEMA,
         TABLE_TYPE,
@@ -77,15 +90,17 @@ export class SnowflakeSchemaIntrospector {
             tableName: row.TABLE_NAME,
             tableSchema: row.TABLE_SCHEMA,
             tableType: row.TABLE_TYPE,
-            comment: row.COMMENT,
+            comment: row.COMMENT || undefined,
         }));
     }
     /**
-     * Get columns for a table
+     * Fetch all columns for the entire schema in one query.
+     * Returns a map from table name to ordered column rows.
      */
-    async getColumns(schemaName, tableName) {
+    async getAllColumns(schemaName) {
         const sql = `
-      SELECT 
+      SELECT
+        TABLE_NAME,
         COLUMN_NAME,
         DATA_TYPE,
         IS_NULLABLE,
@@ -96,60 +111,57 @@ export class SnowflakeSchemaIntrospector {
         NUMERIC_SCALE
       FROM ${this.credentials.database}.INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_SCHEMA = ?
-        AND TABLE_NAME = ?
-      ORDER BY ORDINAL_POSITION
+      ORDER BY TABLE_NAME, ORDINAL_POSITION
     `;
-        const rows = await this.execute(sql, [schemaName, tableName]);
-        const primaryKeys = await this.getPrimaryKeys(schemaName, tableName);
-        return rows.map(row => ({
-            columnName: row.COLUMN_NAME,
-            dataType: row.DATA_TYPE,
-            isNullable: row.IS_NULLABLE === 'YES',
-            defaultValue: row.COLUMN_DEFAULT,
-            isPrimaryKey: primaryKeys.includes(row.COLUMN_NAME),
-            comment: row.COMMENT,
-            characterMaximumLength: row.CHARACTER_MAXIMUM_LENGTH,
-            numericPrecision: row.NUMERIC_PRECISION,
-            numericScale: row.NUMERIC_SCALE,
-        }));
+        const rows = await this.execute(sql, [schemaName]);
+        return groupBy(rows, row => row.TABLE_NAME);
     }
     /**
-     * Get primary key columns
+     * Fetch all primary key columns for the entire schema in one query.
+     * Returns a map from table name to ordered PK column names.
      */
-    async getPrimaryKeys(schemaName, tableName) {
+    async getAllPrimaryKeys(schemaName) {
         const sql = `
-      SELECT COLUMN_NAME
+      SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME
       FROM ${this.credentials.database}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
       JOIN ${this.credentials.database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
         ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
         AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
         AND tc.TABLE_NAME = kcu.TABLE_NAME
       WHERE tc.TABLE_SCHEMA = ?
-        AND tc.TABLE_NAME = ?
         AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-      ORDER BY kcu.ORDINAL_POSITION
+      ORDER BY kcu.TABLE_NAME, kcu.ORDINAL_POSITION
     `;
         try {
-            const rows = await this.execute(sql, [schemaName, tableName]);
-            return rows.map(row => row.COLUMN_NAME);
+            const rows = await this.execute(sql, [schemaName]);
+            const grouped = groupBy(rows, row => row.TABLE_NAME);
+            const result = new Map();
+            for (const [tbl, pkRows] of grouped) {
+                result.set(tbl, pkRows.map(r => r.COLUMN_NAME));
+            }
+            return result;
         }
         catch (error) {
-            // Primary key info might not be available
-            logWarning(`Could not retrieve primary keys for ${tableName}`);
-            return [];
+            logWarning(`Could not retrieve primary key metadata for schema ${schemaName}`, {
+                error: error?.message,
+            });
+            return new Map();
         }
     }
     /**
-     * Get foreign keys
+     * Fetch all foreign keys for the entire schema in one query.
+     * Returns a map from table name to FK info records.
+     *
+     * Note: Snowflake does not enforce FKs, but they can be defined for metadata.
      */
-    async getForeignKeys(schemaName, tableName) {
-        // Note: Snowflake doesn't enforce foreign keys, but they can be defined for metadata
+    async getAllForeignKeys(schemaName) {
         const sql = `
-      SELECT 
+      SELECT
+        kcu.TABLE_NAME,
         rc.CONSTRAINT_NAME,
         kcu.COLUMN_NAME,
-        kcu2.TABLE_NAME as REFERENCED_TABLE,
-        kcu2.COLUMN_NAME as REFERENCED_COLUMN
+        kcu2.TABLE_NAME AS REFERENCED_TABLE,
+        kcu2.COLUMN_NAME AS REFERENCED_COLUMN
       FROM ${this.credentials.database}.INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
       JOIN ${this.credentials.database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
         ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
@@ -158,21 +170,27 @@ export class SnowflakeSchemaIntrospector {
         ON rc.UNIQUE_CONSTRAINT_NAME = kcu2.CONSTRAINT_NAME
         AND rc.UNIQUE_CONSTRAINT_SCHEMA = kcu2.TABLE_SCHEMA
       WHERE kcu.TABLE_SCHEMA = ?
-        AND kcu.TABLE_NAME = ?
+      ORDER BY kcu.TABLE_NAME
     `;
         try {
-            const rows = await this.execute(sql, [schemaName, tableName]);
-            return rows.map(row => ({
-                constraintName: row.CONSTRAINT_NAME,
-                columnName: row.COLUMN_NAME,
-                referencedTable: row.REFERENCED_TABLE,
-                referencedColumn: row.REFERENCED_COLUMN,
-            }));
+            const rows = await this.execute(sql, [schemaName]);
+            const grouped = groupBy(rows, row => row.TABLE_NAME);
+            const result = new Map();
+            for (const [tbl, fkRows] of grouped) {
+                result.set(tbl, fkRows.map(r => ({
+                    constraintName: r.CONSTRAINT_NAME,
+                    columnName: r.COLUMN_NAME,
+                    referencedTable: r.REFERENCED_TABLE,
+                    referencedColumn: r.REFERENCED_COLUMN,
+                })));
+            }
+            return result;
         }
         catch (error) {
-            // Foreign key info might not be available
-            logWarning(`Could not retrieve foreign keys for ${tableName}`);
-            return [];
+            logWarning(`Could not retrieve foreign key metadata for schema ${schemaName}`, {
+                error: error?.message,
+            });
+            return new Map();
         }
     }
     /**
@@ -198,6 +216,46 @@ export class SnowflakeSchemaIntrospector {
         }
     }
 }
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+/**
+ * Group an array of rows by a key-extracting function into a Map.
+ */
+function groupBy(rows, keyFn) {
+    const map = new Map();
+    for (const row of rows) {
+        const key = keyFn(row);
+        const existing = map.get(key);
+        if (existing) {
+            existing.push(row);
+        }
+        else {
+            map.set(key, [row]);
+        }
+    }
+    return map;
+}
+/**
+ * Build ColumnInfo records from raw column rows and the pre-fetched PK set.
+ */
+function buildColumns(columnRows, primaryKeys) {
+    const pkSet = new Set(primaryKeys);
+    return columnRows.map(row => ({
+        columnName: row.COLUMN_NAME,
+        dataType: row.DATA_TYPE,
+        isNullable: row.IS_NULLABLE === 'YES',
+        defaultValue: row.COLUMN_DEFAULT ?? undefined,
+        isPrimaryKey: pkSet.has(row.COLUMN_NAME),
+        comment: row.COMMENT || undefined,
+        characterMaximumLength: row.CHARACTER_MAXIMUM_LENGTH ?? undefined,
+        numericPrecision: row.NUMERIC_PRECISION ?? undefined,
+        numericScale: row.NUMERIC_SCALE ?? undefined,
+    }));
+}
+// ---------------------------------------------------------------------------
+// CDS model generation
+// ---------------------------------------------------------------------------
 /**
  * Generate CDS model from schema definition
  */
@@ -212,10 +270,11 @@ export function generateCDSModel(schemaDefinition, namespace = 'imported') {
     const starAnnotations = computeStarSchemaAnnotations(schemaDefinition);
     for (const [tableName, metadata] of schemaDefinition.tables) {
         const annotation = starAnnotations.get(tableName);
+        const isFact = annotation === '@Analytics.dataCategory: #FACT';
         if (annotation) {
             lines.push(annotation);
         }
-        lines.push(...generateEntityDefinition(tableName, metadata));
+        lines.push(...generateEntityDefinition(tableName, metadata, isFact));
         lines.push('');
     }
     return lines.join('\n');
@@ -260,7 +319,7 @@ function computeStarSchemaAnnotations(schema) {
 /**
  * Generate single entity definition
  */
-function generateEntityDefinition(tableName, metadata) {
+function generateEntityDefinition(tableName, metadata, isFact) {
     const lines = [];
     // Add comment if available
     if (metadata.info.comment) {
@@ -271,30 +330,38 @@ function generateEntityDefinition(tableName, metadata) {
     if (isView) {
         lines.push('@readonly');
     }
+    // Always emit the physical table name so deploying the generated CDS maps
+    // back to the original table and doesn't create a new one named after the
+    // PascalCase entity.
+    lines.push(`@cds.persistence.name: '${tableName}'`);
     // Entity name (convert to PascalCase)
     const entityName = toPascalCase(tableName);
     lines.push(`entity ${entityName} {`);
     // Generate columns
     for (const column of metadata.columns) {
-        lines.push(...generateColumnDefinition(column, metadata));
+        lines.push(...generateColumnDefinition(column, metadata, isFact));
     }
     lines.push('}');
     return lines;
 }
+/** Numeric CDS types that qualify for @Aggregation.default on FACT tables */
+const MEASURE_TYPES = new Set(['Integer', 'Integer64', 'Decimal', 'Double']);
 /**
  * Generate column definition
  */
-function generateColumnDefinition(column, metadata) {
+function generateColumnDefinition(column, metadata, isFact) {
     const lines = [];
     const indent = '  ';
     // Add comment if available
     if (column.comment) {
         lines.push(`${indent}// ${column.comment}`);
     }
-    // Key annotation
-    const annotations = [];
-    if (column.isPrimaryKey) {
-        annotations.push('key');
+    // Check if this is a foreign key — generate Association instead of scalar
+    const fk = metadata.foreignKeys.find(fk => fk.columnName === column.columnName);
+    if (fk) {
+        const referencedEntity = toPascalCase(fk.referencedTable);
+        lines.push(`${indent}${toCamelCase(column.columnName)} : Association to ${referencedEntity};`);
+        return lines;
     }
     // Map Snowflake type to CDS type
     let cdsType = mapSnowflakeTypeToCDS(column.dataType);
@@ -303,24 +370,24 @@ function generateColumnDefinition(column, metadata) {
         cdsType = `String(${column.characterMaximumLength})`;
     }
     else if (column.numericPrecision && cdsType === 'cds.Decimal') {
-        const scale = column.numericScale || 0;
+        const scale = column.numericScale ?? 0;
         cdsType = `Decimal(${column.numericPrecision}, ${scale})`;
     }
-    // Clean up cds. prefix for common types
-    cdsType = cdsType.replace('cds.', '');
-    // Build column definition
-    const keyPrefix = annotations.length > 0 ? 'key ' : '';
+    else {
+        // Strip cds. prefix for common types
+        cdsType = cdsType.replace(/^cds\./, '');
+    }
+    // @Aggregation.default for numeric measure columns on FACT tables
+    const baseType = cdsType.split('(')[0]; // e.g. "Decimal" from "Decimal(10, 2)"
+    if (isFact && !column.isPrimaryKey && MEASURE_TYPES.has(baseType)) {
+        lines.push(`${indent}@Aggregation.default: #SUM`);
+    }
+    // Key annotation
+    const keyPrefix = column.isPrimaryKey ? 'key ' : '';
     let columnDef = `${indent}${keyPrefix}${toCamelCase(column.columnName)} : ${cdsType}`;
-    // Not null annotation (skip for keys, they're always not null)
+    // Not null annotation (skip for keys — they are always not null)
     if (!column.isNullable && !column.isPrimaryKey) {
         columnDef += ' @mandatory';
-    }
-    // Check if this is a foreign key
-    const fk = metadata.foreignKeys.find(fk => fk.columnName === column.columnName);
-    if (fk) {
-        // Generate association
-        const referencedEntity = toPascalCase(fk.referencedTable);
-        columnDef = `${indent}${toCamelCase(column.columnName)} : Association to ${referencedEntity}`;
     }
     columnDef += ';';
     lines.push(columnDef);

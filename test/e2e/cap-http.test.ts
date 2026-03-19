@@ -1601,4 +1601,396 @@ before(function () { this.timeout(120_000); });
       expect(res.data.value).to.be.an('array').with.lengthOf.gte(3); // EMEA, AMER, APAC
     });
   });
+
+  // ==========================================================================
+  // Advanced $filter operators (not, ne, arithmetic)
+  describe('Advanced $filter operators', () => {
+    it('not() excludes matching rows', async () => {
+      const res = await GET(`${BASE}/Books?$filter=not (price gt 35)`);
+      expect(res.status).to.equal(200);
+      // Only 'Adapter Patterns' (29.99) ≤ 35; 'Snowflake Deep Dive' (39.99) excluded
+      for (const b of res.data.value) {
+        expect(Number(b.price)).to.be.lte(35);
+      }
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+      expect(ids).to.not.include(BOOK_ID2);
+    });
+
+    it('ne operator returns rows that do not match', async () => {
+      const res = await GET(`${BASE}/Books?$filter=ID ne '${BOOK_ID}'`);
+      expect(res.status).to.equal(200);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.not.include(BOOK_ID);
+      expect(ids).to.include(BOOK_ID2);
+    });
+
+    it('ge and le together form a BETWEEN-style range', async () => {
+      const res = await GET(`${BASE}/Books?$filter=price ge 25 and price le 35`);
+      expect(res.status).to.equal(200);
+      // Only 'Adapter Patterns' (29.99) falls in [25,35]
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(1);
+      for (const b of res.data.value) {
+        expect(Number(b.price)).to.be.within(25, 35);
+      }
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+      expect(ids).to.not.include(BOOK_ID2);
+    });
+
+    it('arithmetic mul in $filter (price mul 2 gt 70)', async () => {
+      const res = await GET(`${BASE}/Books?$filter=price mul 2 gt 70`);
+      expect(res.status).to.equal(200);
+      // 39.99 * 2 = 79.98 > 70 → Snowflake Deep Dive matches; 29.99 * 2 = 59.98 ≤ 70
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID2);
+      expect(ids).to.not.include(BOOK_ID);
+    });
+
+    it('arithmetic add in $filter (price add 5 gt 44)', async () => {
+      const res = await GET(`${BASE}/Books?$filter=price add 5 gt 44`);
+      expect(res.status).to.equal(200);
+      // 39.99 + 5 = 44.99 > 44 → BOOK_ID2 matches; 29.99 + 5 = 34.99 ≤ 44
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID2);
+      expect(ids).to.not.include(BOOK_ID);
+    });
+
+    it('arithmetic sub in $filter (price sub 5 gt 34)', async () => {
+      const res = await GET(`${BASE}/Books?$filter=price sub 5 gt 34`);
+      expect(res.status).to.equal(200);
+      // 39.99 - 5 = 34.99 > 34 → BOOK_ID2; 29.99 - 5 = 24.99 ≤ 34
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID2);
+    });
+  });
+
+  // ==========================================================================
+  // Multiple $orderby keys
+  describe('Multiple $orderby keys', () => {
+    it('$orderby=author_ID asc,price desc sorts by two columns', async () => {
+      const res = await GET(`${BASE}/Books?$orderby=author_ID asc,price desc`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+      // Among books with the same author, price must be descending
+      const grouped: Record<string, number[]> = {};
+      for (const b of res.data.value) {
+        const aid = b.author_ID;
+        if (aid) {
+          if (!grouped[aid]) grouped[aid] = [];
+          grouped[aid].push(Number(b.price));
+        }
+      }
+      for (const prices of Object.values(grouped)) {
+        for (let i = 1; i < prices.length; i++) {
+          expect(prices[i]).to.be.lte(prices[i - 1]);
+        }
+      }
+    });
+  });
+
+  // ==========================================================================
+  // $expand with $skip inside nested expand
+  describe('$expand with $skip in nested expand options', () => {
+    it('$expand=books($skip=1;$orderby=price asc) skips the cheapest book', async () => {
+      const allRes  = await GET(`${BASE}/Authors?$filter=ID eq '${AUTHOR_ID}'&$expand=books($orderby=price asc)`);
+      const skipRes = await GET(`${BASE}/Authors?$filter=ID eq '${AUTHOR_ID}'&$expand=books($skip=1;$orderby=price asc)`);
+      expect(skipRes.status).to.equal(200);
+      const allBooks  = allRes.data.value[0]?.books ?? [];
+      const skipBooks = skipRes.data.value[0]?.books ?? [];
+      if (allBooks.length > 1) {
+        expect(skipBooks.length).to.equal(allBooks.length - 1);
+        expect(skipBooks[0].ID).to.equal(allBooks[1].ID);
+      }
+    });
+  });
+
+  // ==========================================================================
+  // Lambda all
+  describe('Lambda all', () => {
+    it('books/all(b:b/price gt 0) returns authors whose books are all positively priced', async () => {
+      const res = await GET(`${BASE}/Authors?$filter=books/all(b:b/price gt 0)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      // John Doe has both books at positive price → he must be included
+      const ids = res.data.value.map((a: any) => a.ID);
+      expect(ids).to.include(AUTHOR_ID);
+    });
+
+    it('books/all(b:b/price gt 999) returns no authors with books > 999 (all are cheaper)', async () => {
+      const res = await GET(`${BASE}/Authors?$filter=books/all(b:b/price gt 999)`);
+      expect(res.status).to.equal(200);
+      // John has books at 29.99 and 39.99 — both fail the predicate, so all() is false for him
+      const ids = res.data.value.map((a: any) => a.ID);
+      expect(ids).to.not.include(AUTHOR_ID);
+    });
+  });
+
+  // ==========================================================================
+  // $apply groupby with multiple dimensions
+  describe('$apply groupby with multiple dimensions', () => {
+    it('groupby((region,channel)) returns one row per region/channel combination', async () => {
+      const res = await GET(
+        `${BASE}/SalesFacts?$apply=groupby((region,channel),aggregate(units with sum as totalUnits))`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(3);
+      for (const row of res.data.value) {
+        expect(row).to.have.property('region');
+        expect(row).to.have.property('channel');
+        expect(row.totalUnits).to.be.a('number');
+      }
+      // EMEA/Online: 5 units
+      const emeaOnline = res.data.value.find((r: any) => r.region === 'EMEA' && r.channel === 'Online');
+      expect(emeaOnline).to.exist;
+      expect(Number(emeaOnline.totalUnits)).to.equal(5);
+      // EMEA/Retail: 2 units
+      const emeaRetail = res.data.value.find((r: any) => r.region === 'EMEA' && r.channel === 'Retail');
+      expect(emeaRetail).to.exist;
+      expect(Number(emeaRetail.totalUnits)).to.equal(2);
+    });
+
+    it('groupby((channel)) with both sum and avg aggregations', async () => {
+      const res = await GET(
+        `${BASE}/SalesFacts?$apply=groupby((channel),aggregate(units with sum as totalUnits,amount with avg as avgAmount))`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+      for (const row of res.data.value) {
+        expect(row.totalUnits).to.be.a('number');
+        expect(row.avgAmount).to.be.a('number');
+      }
+    });
+  });
+
+  // ==========================================================================
+  // $apply chained transformations
+  describe('$apply chained filter → groupby', () => {
+    it('filter(channel eq Online) then groupby((region)) only counts Online rows', async () => {
+      const res = await GET(
+        `${BASE}/SalesFacts?$apply=filter(channel eq 'Online')/groupby((region),aggregate(units with sum as totalUnits))`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      // Online rows: EMEA(5), AMER(3), APAC(1) → 3 distinct regions
+      expect(res.data.value.length).to.be.gte(3);
+      const emea = res.data.value.find((r: any) => r.region === 'EMEA');
+      expect(emea).to.exist;
+      expect(Number(emea.totalUnits)).to.equal(5);  // only Online row for EMEA
+    });
+
+    it('filter(amount gt 60) then aggregate(units with sum as totalUnits)', async () => {
+      const res = await GET(
+        `${BASE}/SalesFacts?$apply=filter(amount gt 60)/aggregate(units with sum as totalUnits)`
+      );
+      expect(res.status).to.equal(200);
+      // Rows with amount > 60: EMEA/Online/99.95(5) and AMER/Online/79.95(3) → total = 8
+      expect(res.data.value).to.be.an('array').with.lengthOf(1);
+      expect(Number(res.data.value[0].totalUnits)).to.equal(8);
+    });
+  });
+
+  // ==========================================================================
+  // OData substring function
+  describe('OData substring function in $filter', () => {
+    it('substring(title,0,7) eq Adapter returns only the Adapter Patterns book', async () => {
+      const res = await GET(`${BASE}/Books?$filter=substring(title,0,7) eq 'Adapter'`);
+      expect(res.status).to.equal(200);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+      expect(ids).to.not.include(BOOK_ID2);
+    });
+
+    it('substring(title,0,9) eq Snowflake returns the Snowflake Deep Dive book', async () => {
+      const res = await GET(`${BASE}/Books?$filter=substring(title,0,9) eq 'Snowflake'`);
+      expect(res.status).to.equal(200);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID2);
+      expect(ids).to.not.include(BOOK_ID);
+    });
+  });
+
+  // ==========================================================================
+  // Navigation property filter — OR and NOT conditions
+  describe('Navigation property filter — OR and NOT', () => {
+    it('$filter=author/country eq DE or author/country eq US returns all books (both exist)', async () => {
+      const res = await GET(`${BASE}/Books?$filter=author/country eq 'DE' or author/country eq 'US'`);
+      expect(res.status).to.equal(200);
+      // Both seeded books belong to John (DE)
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+    });
+
+    it('$filter=not(author/country eq US) returns books by non-US authors', async () => {
+      const res = await GET(`${BASE}/Books?$filter=not(author/country eq 'US')`);
+      expect(res.status).to.equal(200);
+      // All seeded books are by John (DE) — expect at least 2
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+      expect(ids).to.include(BOOK_ID2);
+    });
+  });
+
+  // ==========================================================================
+  // Deep $expand with level-specific $filter
+  describe('Deep $expand with level-specific $filter', () => {
+    it('$expand=author($filter=country eq DE;$expand=books($filter=price gt 30)) applies filters at each level', async () => {
+      const res = await GET(
+        `${BASE}/Books?$top=1&$filter=ID eq '${BOOK_ID}'&$expand=author($filter=country eq 'DE';$expand=books($filter=price gt 30))`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.have.lengthOf(1);
+      const book = res.data.value[0];
+      // Author is John (DE) — should be present
+      if (book.author) {
+        expect(book.author.country).to.equal('DE');
+        // Author's books filtered to price > 30: only BOOK_ID2 (39.99)
+        if (Array.isArray(book.author.books)) {
+          for (const b of book.author.books) {
+            expect(Number(b.price)).to.be.greaterThan(30);
+          }
+          const bookIds = book.author.books.map((b: any) => b.ID);
+          expect(bookIds).to.include(BOOK_ID2);
+          expect(bookIds).to.not.include(BOOK_ID);
+        }
+      }
+    });
+  });
+
+  // ==========================================================================
+  // Draft listing filter (Fiori Elements pattern) + DraftAdministrativeData expand
+  describe('Draft listing filter and DraftAdministrativeData expand', () => {
+    let listDraftId: string;
+
+    before(async () => {
+      const res = await POST(`${BASE}/Books`, { title: 'Draft Listing Test', price: 5.00 });
+      listDraftId = res.data.ID;
+    });
+
+    it('$filter=IsActiveEntity eq true returns only active entities', async () => {
+      const res = await GET(`${BASE}/Books?$filter=IsActiveEntity eq true`);
+      expect(res.status).to.equal(200);
+      for (const b of res.data.value) {
+        expect(b.IsActiveEntity).to.equal(true);
+      }
+    });
+
+    it('$filter=IsActiveEntity eq false returns only draft entities', async () => {
+      const res = await GET(`${BASE}/Books?$filter=IsActiveEntity eq false`);
+      expect(res.status).to.equal(200);
+      for (const b of res.data.value) {
+        expect(b.IsActiveEntity).to.equal(false);
+      }
+      // Our freshly created draft must be here
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(listDraftId);
+    });
+
+    it('Fiori list-report filter: IsActiveEntity eq true or SiblingEntity/IsActiveEntity eq null', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=IsActiveEntity eq true or SiblingEntity/IsActiveEntity eq null`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      // Must include our draft (it has no sibling → SiblingEntity/IsActiveEntity eq null)
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(listDraftId);
+    });
+
+    it('$expand=DraftAdministrativeData returns draft admin record on a draft entity', async () => {
+      const res = await GET(
+        `${BASE}/Books(ID=${listDraftId},IsActiveEntity=false)?$expand=DraftAdministrativeData`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.DraftAdministrativeData).to.be.an('object');
+      expect(res.data.DraftAdministrativeData).to.have.property('DraftUUID');
+    });
+
+    it('$expand=DraftAdministrativeData combined with $select=ID,title,IsActiveEntity', async () => {
+      const res = await GET(
+        `${BASE}/Books(ID=${listDraftId},IsActiveEntity=false)?$select=ID,title,IsActiveEntity&$expand=DraftAdministrativeData`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data).to.have.property('ID', listDraftId);
+      expect(res.data).to.have.property('IsActiveEntity', false);
+      expect(res.data.DraftAdministrativeData).to.be.an('object');
+    });
+
+    after(async () => {
+      if (listDraftId) {
+        await DELETE_REQ(`${BASE}/Books(ID=${listDraftId},IsActiveEntity=false)`).catch(() => {});
+        await db.run(`DELETE FROM ${BOOKS_TABLE} WHERE ID = '${listDraftId}'`).catch(() => {});
+      }
+    });
+  });
+
+  // ==========================================================================
+  // $select combined with $count
+  describe('$select combined with $count', () => {
+    it('$select=ID&$count=true projects only ID while reporting total count', async () => {
+      const res = await GET(`${BASE}/Books?$select=ID&$count=true&$filter=IsActiveEntity eq true`);
+      expect(res.status).to.equal(200);
+      expect(res.data['@odata.count']).to.be.a('number').and.gte(2);
+      for (const b of res.data.value) {
+        expect(b).to.have.property('ID');
+        expect(b).to.not.have.property('title');
+        expect(b).to.not.have.property('price');
+      }
+    });
+
+    it('$select=title,price&$orderby=price desc&$count=true returns sorted projected results', async () => {
+      const res = await GET(
+        `${BASE}/Books?$select=title,price&$orderby=price desc&$count=true&$filter=IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data['@odata.count']).to.be.a('number').and.gte(2);
+      const prices = res.data.value.map((b: any) => Number(b.price));
+      for (let i = 1; i < prices.length; i++) {
+        expect(prices[i]).to.be.lte(prices[i - 1]);
+      }
+      // Only projected fields
+      for (const b of res.data.value) {
+        expect(b).to.have.property('title');
+        expect(b).to.have.property('price');
+        expect(b).to.not.have.property('stock');
+      }
+    });
+  });
+
+  // ==========================================================================
+  // $expand at top level combined with $orderby and $filter
+  describe('$expand combined with top-level $orderby and $filter', () => {
+    it('$filter + $orderby + $expand all applied together', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=price gt 10&$orderby=price asc&$expand=author($select=ID,name)&$filter=IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array');
+      // Prices must be ascending
+      const prices = res.data.value.map((b: any) => Number(b.price));
+      for (let i = 1; i < prices.length; i++) {
+        expect(prices[i]).to.be.gte(prices[i - 1]);
+      }
+      // Each book's author must have only ID and name (from $select)
+      for (const b of res.data.value) {
+        if (b.author) {
+          expect(b.author).to.have.property('ID');
+          expect(b.author).to.have.property('name');
+        }
+      }
+    });
+
+    it('$expand=books($top=1;$orderby=price asc) + $expand=items not applicable — verify to-many $top respected per author', async () => {
+      const res = await GET(`${BASE}/Authors?$expand=books($top=1;$orderby=price asc)`);
+      expect(res.status).to.equal(200);
+      for (const author of res.data.value) {
+        expect(author.books.length).to.be.lte(1);
+        // The one book returned should be the cheapest
+        if (author.books.length === 1 && author.ID === AUTHOR_ID) {
+          // John's cheapest book is BOOK_ID ('Adapter Patterns', 29.99)
+          expect(author.books[0].ID).to.equal(BOOK_ID);
+        }
+      }
+    });
+  });
 });
