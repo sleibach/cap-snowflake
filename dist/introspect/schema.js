@@ -57,6 +57,21 @@ export class SnowflakeSchemaIntrospector {
         const allColumns = await this.getAllColumns(normalizedSchema);
         const allPrimaryKeys = await this.getAllPrimaryKeys(normalizedSchema);
         const allForeignKeys = await this.getAllForeignKeys(normalizedSchema);
+        const vectorDimensions = await this.getVectorDimensions(normalizedSchema);
+        // Merge VECTOR dimensions into column rows so buildColumns can reconstruct
+        // the full type string (e.g. VECTOR(FLOAT, 1536)).
+        for (const [tableName, columnRows] of allColumns) {
+            const tableDims = vectorDimensions.get(tableName);
+            if (!tableDims)
+                continue;
+            for (const row of columnRows) {
+                if (row.DATA_TYPE === 'VECTOR') {
+                    const dim = tableDims.get(row.COLUMN_NAME);
+                    if (dim)
+                        row._vectorDim = dim;
+                }
+            }
+        }
         const schemaDefinition = { tables: new Map() };
         for (const table of tables) {
             const tableName = table.tableName;
@@ -117,27 +132,32 @@ export class SnowflakeSchemaIntrospector {
         return groupBy(rows, row => row.TABLE_NAME);
     }
     /**
-     * Fetch all primary key columns for the entire schema in one query.
+     * Fetch all primary key columns for the entire schema using SHOW PRIMARY KEYS.
      * Returns a map from table name to ordered PK column names.
+     *
+     * TABLE_CONSTRAINTS / KEY_COLUMN_USAGE is unreliable in Snowflake —
+     * SHOW PRIMARY KEYS IN SCHEMA is the authoritative source.
      */
     async getAllPrimaryKeys(schemaName) {
-        const sql = `
-      SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME
-      FROM ${this.credentials.database}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-      JOIN ${this.credentials.database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
-        ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-        AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-        AND tc.TABLE_NAME = kcu.TABLE_NAME
-      WHERE tc.TABLE_SCHEMA = ?
-        AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-      ORDER BY kcu.TABLE_NAME, kcu.ORDINAL_POSITION
-    `;
         try {
-            const rows = await this.execute(sql, [schemaName]);
-            const grouped = groupBy(rows, row => row.TABLE_NAME);
+            // SHOW PRIMARY KEYS does not accept bind parameters — the schema name is
+            // already normalised to UPPERCASE at the call site so injection risk is
+            // negligible in this context (introspection-only, not user-facing SQL).
+            const rows = await this.execute(`SHOW PRIMARY KEYS IN SCHEMA ${this.credentials.database}.${schemaName}`);
+            // SHOW commands return lowercase column names: table_name, column_name, key_sequence
             const result = new Map();
-            for (const [tbl, pkRows] of grouped) {
-                result.set(tbl, pkRows.map(r => r.COLUMN_NAME));
+            for (const row of rows) {
+                const tableName = (row.table_name ?? row.TABLE_NAME);
+                const colName = (row.column_name ?? row.COLUMN_NAME);
+                if (!tableName || !colName)
+                    continue;
+                const existing = result.get(tableName);
+                if (existing) {
+                    existing.push(colName);
+                }
+                else {
+                    result.set(tableName, [colName]);
+                }
             }
             return result;
         }
@@ -147,6 +167,55 @@ export class SnowflakeSchemaIntrospector {
             });
             return new Map();
         }
+    }
+    /**
+     * Fetch VECTOR column dimensions for the entire schema using SHOW COLUMNS.
+     * Returns Map<tableName, Map<columnName, dimension>>.
+     *
+     * INFORMATION_SCHEMA.COLUMNS reports VECTOR type as bare 'VECTOR' without
+     * the dimension.  SHOW COLUMNS includes a JSON `data_type` field that
+     * contains the full vector metadata, e.g.
+     *   {"type":"VECTOR","length":1536,"vectorElementType":"float",...}
+     */
+    async getVectorDimensions(schemaName) {
+        const result = new Map();
+        try {
+            const rows = await this.execute(`SHOW COLUMNS IN SCHEMA ${this.credentials.database}.${schemaName}`);
+            for (const row of rows) {
+                const tableName = (row.table_name ?? row.TABLE_NAME);
+                const colName = (row.column_name ?? row.COLUMN_NAME);
+                const dataTypeRaw = row.data_type ?? row.DATA_TYPE;
+                if (!tableName || !colName || dataTypeRaw == null)
+                    continue;
+                let parsed;
+                if (typeof dataTypeRaw === 'object') {
+                    parsed = dataTypeRaw;
+                }
+                else {
+                    try {
+                        parsed = JSON.parse(dataTypeRaw);
+                    }
+                    catch {
+                        continue;
+                    }
+                }
+                if (parsed?.type === 'VECTOR' && (parsed?.dimension ?? parsed?.length)) {
+                    const dim = (parsed.dimension ?? parsed.length);
+                    let tableMap = result.get(tableName);
+                    if (!tableMap) {
+                        tableMap = new Map();
+                        result.set(tableName, tableMap);
+                    }
+                    tableMap.set(colName, dim);
+                }
+            }
+        }
+        catch (error) {
+            logWarning('Could not retrieve VECTOR column dimensions via SHOW COLUMNS', {
+                error: error?.message,
+            });
+        }
+        return result;
     }
     /**
      * Fetch all foreign keys for the entire schema in one query.
@@ -241,17 +310,38 @@ function groupBy(rows, keyFn) {
  */
 function buildColumns(columnRows, primaryKeys) {
     const pkSet = new Set(primaryKeys);
-    return columnRows.map(row => ({
-        columnName: row.COLUMN_NAME,
-        dataType: row.DATA_TYPE,
-        isNullable: row.IS_NULLABLE === 'YES',
-        defaultValue: row.COLUMN_DEFAULT ?? undefined,
-        isPrimaryKey: pkSet.has(row.COLUMN_NAME),
-        comment: row.COMMENT || undefined,
-        characterMaximumLength: row.CHARACTER_MAXIMUM_LENGTH ?? undefined,
-        numericPrecision: row.NUMERIC_PRECISION ?? undefined,
-        numericScale: row.NUMERIC_SCALE ?? undefined,
-    }));
+    return columnRows.map(row => {
+        // Snowflake INFORMATION_SCHEMA stores NUMBER types internally as 'FIXED'.
+        // Reconstruct the proper NUMBER(p,s) string so mapSnowflakeTypeToCDS works.
+        let dataType = row.DATA_TYPE;
+        if (dataType === 'FIXED' || dataType === 'NUMBER') {
+            const p = row.NUMERIC_PRECISION;
+            const s = row.NUMERIC_SCALE;
+            // Reconstruct proper type string. Scale > 0 → Decimal; otherwise keep
+            // bare NUMBER so it round-trips as cds.Integer without inflating precision.
+            if (s != null && s > 0) {
+                dataType = `NUMBER(${p},${s})`;
+            }
+            else {
+                dataType = 'NUMBER';
+            }
+        }
+        else if (dataType === 'VECTOR' && row._vectorDim) {
+            // Dimension was populated by getVectorDimensions() via SHOW COLUMNS.
+            dataType = `VECTOR(FLOAT, ${row._vectorDim})`;
+        }
+        return {
+            columnName: row.COLUMN_NAME,
+            dataType,
+            isNullable: row.IS_NULLABLE === 'YES',
+            defaultValue: row.COLUMN_DEFAULT ?? undefined,
+            isPrimaryKey: pkSet.has(row.COLUMN_NAME),
+            comment: row.COMMENT || undefined,
+            characterMaximumLength: row.CHARACTER_MAXIMUM_LENGTH ?? undefined,
+            numericPrecision: row.NUMERIC_PRECISION ?? undefined,
+            numericScale: row.NUMERIC_SCALE ?? undefined,
+        };
+    });
 }
 // ---------------------------------------------------------------------------
 // CDS model generation

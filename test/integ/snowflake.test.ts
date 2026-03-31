@@ -313,7 +313,7 @@ function loadCredentials(): any {
   // =========================================================================
   describe('Transaction support', () => {
     it('should commit a transaction successfully (SDK mode)', async () => {
-      if (!db.sdkClient) {
+      if (!db.sdkPool) {
         console.log('Skipping: not in SDK mode');
         return;
       }
@@ -333,7 +333,7 @@ function loadCredentials(): any {
     });
 
     it('should rollback a transaction on error (SDK mode)', async () => {
-      if (!db.sdkClient) {
+      if (!db.sdkPool) {
         console.log('Skipping: not in SDK mode');
         return;
       }

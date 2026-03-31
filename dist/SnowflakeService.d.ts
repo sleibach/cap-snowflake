@@ -5,7 +5,12 @@ import cds from '@sap/cds';
 export declare class SnowflakeService extends cds.DatabaseService {
     private credentials;
     private sqlApiClient?;
-    private sdkClient?;
+    /** Default SDK pool for single-tenant / non-multitenant SDK mode */
+    private sdkPool?;
+    /** Per-tenant SDK pools, keyed by tenant ID (multitenant SDK mode) */
+    private tenantSdkPools;
+    /** SDK clients currently holding an open transaction, keyed by cds.context.id */
+    private activeTransactionClients;
     private transactionStates;
     private get inTransaction();
     private set inTransaction(value);
@@ -24,6 +29,29 @@ export declare class SnowflakeService extends cds.DatabaseService {
      * Our adapter manages context at query level, so this is intentionally a no-op.
      */
     set(_variables: any): void;
+    /**
+     * True when the CAP application is configured for multitenancy.
+     * Checks this.options.multiTenant (service-level override) then
+     * cds.env.requires.multitenancy (global flag set by @sap/cds-mtxs).
+     */
+    private get isMultitenant();
+    /**
+     * Derive the Snowflake schema name for the given tenant ID.
+     * Convention: <tenantSchemaPrefix><TENANT_ID> (sanitised to a valid Snowflake identifier).
+     * The prefix defaults to "TENANT_" but can be overridden in credentials.tenantSchemaPrefix.
+     */
+    private resolveTenantSchema;
+    /**
+     * Returns credentials with the schema overridden to the current tenant's schema
+     * when multitenancy is active and cds.context.tenant is set.
+     * Falls back to this.credentials (static schema) in all other cases.
+     */
+    private getEffectiveCredentials;
+    /**
+     * Get (or lazily create) the SDK pool for the current tenant.
+     * In non-multitenant mode returns the single default pool.
+     */
+    private getTenantSdkPool;
     /**
      * Initialize the service
      */
@@ -108,9 +136,13 @@ export declare class SnowflakeService extends cds.DatabaseService {
      */
     rollback(): Promise<void>;
     /**
-     * Disconnect
+     * Disconnect.
+     *
+     * When called with a tenant ID (by MTX on tenant unsubscribe) only that
+     * tenant's connection pool is drained, leaving all other tenants running.
+     * When called without arguments the full adapter is shut down.
      */
-    disconnect(): Promise<void>;
+    disconnect(tenant?: string): Promise<void>;
     /**
      * Deploy database schema (for cds deploy)
      */

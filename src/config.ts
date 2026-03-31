@@ -12,6 +12,8 @@ export interface SnowflakeCredentials {
   warehouse?: string;
   database?: string;
   schema?: string;
+  /** Schema name prefix for tenant schemas in multitenant deployments. Defaults to 'TENANT_'. */
+  tenantSchemaPrefix?: string;
   auth: 'jwt' | 'sdk';
   timeout?: number;
   jwt?: {

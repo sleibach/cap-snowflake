@@ -67,10 +67,23 @@ export declare class SnowflakeSchemaIntrospector {
      */
     private getAllColumns;
     /**
-     * Fetch all primary key columns for the entire schema in one query.
+     * Fetch all primary key columns for the entire schema using SHOW PRIMARY KEYS.
      * Returns a map from table name to ordered PK column names.
+     *
+     * TABLE_CONSTRAINTS / KEY_COLUMN_USAGE is unreliable in Snowflake —
+     * SHOW PRIMARY KEYS IN SCHEMA is the authoritative source.
      */
     private getAllPrimaryKeys;
+    /**
+     * Fetch VECTOR column dimensions for the entire schema using SHOW COLUMNS.
+     * Returns Map<tableName, Map<columnName, dimension>>.
+     *
+     * INFORMATION_SCHEMA.COLUMNS reports VECTOR type as bare 'VECTOR' without
+     * the dimension.  SHOW COLUMNS includes a JSON `data_type` field that
+     * contains the full vector metadata, e.g.
+     *   {"type":"VECTOR","length":1536,"vectorElementType":"float",...}
+     */
+    private getVectorDimensions;
     /**
      * Fetch all foreign keys for the entire schema in one query.
      * Returns a map from table name to FK info records.

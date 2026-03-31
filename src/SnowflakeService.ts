@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { getSnowflakeConfig, SnowflakeCredentials } from './config.js';
 import { SnowflakeSQLAPIClient } from './client/sqlapi.js';
 import { SnowflakeSDKClient } from './client/sdk.js';
+import { SnowflakeSDKPool } from './client/sdk-pool.js';
 import { cqnToSQL, generateMerge, resolveEntityName } from './cqn/toSQL.js';
 import { qualifyName, toPhysicalIdentifier } from './identifiers.js';
 import { wrapWithCount, stripPagination } from './cqn/pagination.js';
@@ -30,7 +31,12 @@ function getCqn4sql(): (q: any, model: any) => any {
 export class SnowflakeService extends cds.DatabaseService {
   private credentials!: SnowflakeCredentials;
   private sqlApiClient?: SnowflakeSQLAPIClient;
-  private sdkClient?: SnowflakeSDKClient;
+  /** Default SDK pool for single-tenant / non-multitenant SDK mode */
+  private sdkPool?: SnowflakeSDKPool;
+  /** Per-tenant SDK pools, keyed by tenant ID (multitenant SDK mode) */
+  private tenantSdkPools = new Map<string, SnowflakeSDKPool>();
+  /** SDK clients currently holding an open transaction, keyed by cds.context.id */
+  private activeTransactionClients = new Map<string, SnowflakeSDKClient>();
   private transactionStates = new Map<string, boolean>();
 
   private get inTransaction(): boolean {
@@ -67,6 +73,59 @@ export class SnowflakeService extends cds.DatabaseService {
     return;
   }
 
+  // ---------------------------------------------------------------------------
+  // Multitenancy helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * True when the CAP application is configured for multitenancy.
+   * Checks this.options.multiTenant (service-level override) then
+   * cds.env.requires.multitenancy (global flag set by @sap/cds-mtxs).
+   */
+  private get isMultitenant(): boolean {
+    const opts = (this as any).options ?? {};
+    return ('multiTenant' in opts)
+      ? Boolean(opts.multiTenant)
+      : Boolean((cds.env.requires as any)?.multitenancy);
+  }
+
+  /**
+   * Derive the Snowflake schema name for the given tenant ID.
+   * Convention: <tenantSchemaPrefix><TENANT_ID> (sanitised to a valid Snowflake identifier).
+   * The prefix defaults to "TENANT_" but can be overridden in credentials.tenantSchemaPrefix.
+   */
+  private resolveTenantSchema(tenant: string): string {
+    const prefix = this.credentials.tenantSchemaPrefix ?? 'TENANT_';
+    return `${prefix}${tenant}`.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  }
+
+  /**
+   * Returns credentials with the schema overridden to the current tenant's schema
+   * when multitenancy is active and cds.context.tenant is set.
+   * Falls back to this.credentials (static schema) in all other cases.
+   */
+  private getEffectiveCredentials(): SnowflakeCredentials {
+    if (!this.isMultitenant) return this.credentials;
+    const tenant = (cds.context as any)?.tenant;
+    if (!tenant) return this.credentials;
+    return { ...this.credentials, schema: this.resolveTenantSchema(tenant) };
+  }
+
+  /**
+   * Get (or lazily create) the SDK pool for the current tenant.
+   * In non-multitenant mode returns the single default pool.
+   */
+  private getTenantSdkPool(): SnowflakeSDKPool {
+    if (!this.isMultitenant) return this.sdkPool!;
+    const tenant = (cds.context as any)?.tenant ?? '_default';
+    let pool = this.tenantSdkPools.get(tenant);
+    if (!pool) {
+      pool = new SnowflakeSDKPool(this.getEffectiveCredentials());
+      this.tenantSdkPools.set(tenant, pool);
+    }
+    return pool;
+  }
+
   /**
    * Initialize the service
    */
@@ -87,9 +146,13 @@ export class SnowflakeService extends cds.DatabaseService {
       this.sqlApiClient = new SnowflakeSQLAPIClient(this.credentials);
       logInfo('Using Snowflake SQL API with JWT authentication');
     } else {
-      this.sdkClient = new SnowflakeSDKClient(this.credentials);
-      await this.sdkClient.connect();
-      logInfo('Using Snowflake SDK with password authentication');
+      // Use a connection pool for SDK mode so concurrent requests and
+      // multitenant workloads each get their own dedicated connection.
+      this.sdkPool = new SnowflakeSDKPool(this.credentials);
+      // Warm up one connection to validate credentials at startup.
+      const warmup = await this.sdkPool.acquire();
+      this.sdkPool.release(warmup);
+      logInfo('Using Snowflake SDK with password authentication (pooled)');
     }
 
     // Register deep insert/update/delete middleware (handles compositions)
@@ -178,7 +241,7 @@ export class SnowflakeService extends cds.DatabaseService {
       }
 
       // Translate to SQL (now with JOIN-based expand support)
-      const { sql: initialSql, params } = cqnToSQL(transformedQuery, this.credentials, { target: req.target });
+      const { sql: initialSql, params } = cqnToSQL(transformedQuery, this.getEffectiveCredentials(), { target: req.target });
 
       // Snowflake Time Travel: inject AT clause when sap-snowflake-at header is present
       const timeTravelAt = parseTimeTravelHeader(req.headers ?? {});
@@ -409,7 +472,7 @@ export class SnowflakeService extends cds.DatabaseService {
         }
       }
 
-      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
+      const { sql, params } = cqnToSQL(query, this.getEffectiveCredentials(), { target: req.target });
       await this.execute(sql, params);
 
       // Return inserted entries for CAP
@@ -442,7 +505,7 @@ export class SnowflakeService extends cds.DatabaseService {
       // Note: CAP runtime handles @readonly/@insertonly checks before reaching adapter
       // Note: CAP runtime updates managed fields (modifiedAt, modifiedBy) automatically
 
-      const { sql, params } = cqnToSQL(query, this.credentials, { target: req.target });
+      const { sql, params } = cqnToSQL(query, this.getEffectiveCredentials(), { target: req.target });
       const result = await this.execute(sql, params);
       const rowCount = extractDMLRowCount(result);
       logDebug(`UPDATE affected ${rowCount} row${rowCount !== 1 ? 's' : ''}`);
@@ -519,7 +582,7 @@ export class SnowflakeService extends cds.DatabaseService {
         const childTable = this.resolvePhysicalTable(childTarget);
 
         // Generate: DELETE FROM childTable WHERE fkCol IN (SELECT ID FROM parentTable WHERE <parent.where>)
-        const { sql: parentSql, params: parentParams } = cqnToSQL(query, this.credentials, { target });
+        const { sql: parentSql, params: parentParams } = cqnToSQL(query, this.getEffectiveCredentials(), { target });
         const whereIdx = parentSql.indexOf(' WHERE ');
         if (whereIdx !== -1) {
           const whereClause = parentSql.substring(whereIdx + 7);
@@ -531,7 +594,7 @@ export class SnowflakeService extends cds.DatabaseService {
         }
       }
 
-      const { sql, params } = cqnToSQL(query, this.credentials, { target });
+      const { sql, params } = cqnToSQL(query, this.getEffectiveCredentials(), { target });
       const result = await this.execute(sql, params);
       const rowCount = extractDMLRowCount(result);
       logDebug(`DELETE affected ${rowCount} row${rowCount !== 1 ? 's' : ''}`);
@@ -559,7 +622,7 @@ export class SnowflakeService extends cds.DatabaseService {
     // if no @cds.persistence.name annotation and no projection chain is found.
     // Extract the last segment and let qualifyName add db/schema prefix.
     const shortName = physicalName.includes('.') ? physicalName.split('.').pop()! : physicalName;
-    return qualifyName(shortName, this.credentials);
+    return qualifyName(shortName, this.getEffectiveCredentials());
   }
 
   /**
@@ -579,7 +642,7 @@ export class SnowflakeService extends cds.DatabaseService {
       logDebug('UPSERT', () => ({ entity: req.entity, entries: entries.length, keys }));
 
       for (const entry of entries) {
-        const { sql, params } = generateMerge(entity, keys, entry, this.credentials);
+        const { sql, params } = generateMerge(entity, keys, entry, this.getEffectiveCredentials());
         await this.execute(sql, params);
       }
 
@@ -624,9 +687,23 @@ export class SnowflakeService extends cds.DatabaseService {
     if (this.sqlApiClient) {
       const result = await this.sqlApiClient.execute(sql, params);
       return SnowflakeSQLAPIClient.parseRows(result);
-    } else if (this.sdkClient) {
-      const result = await this.sdkClient.execute(sql, params);
-      return result.rows;
+    } else if (this.sdkPool) {
+      const txKey = cds.context?.id ?? 'default';
+      const txClient = this.activeTransactionClients.get(txKey);
+      if (txClient) {
+        // Within an open transaction: reuse the dedicated client
+        const result = await txClient.execute(sql, params);
+        return result.rows;
+      }
+      // Non-transaction: acquire from the (tenant-)pool, execute, release
+      const pool = this.getTenantSdkPool();
+      const client = await pool.acquire();
+      try {
+        const result = await client.execute(sql, params);
+        return result.rows;
+      } finally {
+        pool.release(client);
+      }
     }
 
     throw new Error('No client available');
@@ -641,8 +718,15 @@ export class SnowflakeService extends cds.DatabaseService {
 
     if (this.sqlApiClient && this.sqlApiClient.queryStream) {
       return this.sqlApiClient.queryStream(sql, params, { batchSize: effectiveBatchSize });
-    } else if (this.sdkClient && this.sdkClient.queryStream) {
-      return this.sdkClient.queryStream(sql, params, { batchSize: effectiveBatchSize });
+    } else if (this.sdkPool) {
+      // For SDK streaming, acquire from pool. Note: the client is released when the
+      // stream is fully consumed via execute() fallback below — streaming over SDK
+      // connections that need to be returned to the pool is not yet implemented.
+      const txKey = cds.context?.id ?? 'default';
+      const client = this.activeTransactionClients.get(txKey);
+      if (client?.queryStream) {
+        return client.queryStream(sql, params, { batchSize: effectiveBatchSize });
+      }
     }
 
     return this.execute(sql, params);
@@ -669,12 +753,18 @@ export class SnowflakeService extends cds.DatabaseService {
     }
 
     try {
-      if (this.sdkClient) {
-        await this.sdkClient.beginTransaction();
+      if (this.sdkPool) {
+        // Acquire a dedicated connection for this transaction and hold it until
+        // commit/rollback so all statements in the tx run on the same connection.
+        const pool = this.getTenantSdkPool();
+        const client = await pool.acquire();
+        const txKey = cds.context?.id ?? 'default';
+        this.activeTransactionClients.set(txKey, client);
+        await client.beginTransaction();
       }
       // SQL API: intentional no-op — stateless HTTP requests auto-commit
       this.inTransaction = true;
-      logDebug('transaction started', { mode: this.sdkClient ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
+      logDebug('transaction started', { mode: this.sdkPool ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
     } catch (error) {
       logError('Failed to begin transaction', error);
       throw normalizeError(error);
@@ -691,12 +781,18 @@ export class SnowflakeService extends cds.DatabaseService {
     }
 
     try {
-      if (this.sdkClient) {
-        await this.sdkClient.commit();
+      if (this.sdkPool) {
+        const txKey = cds.context?.id ?? 'default';
+        const client = this.activeTransactionClients.get(txKey);
+        if (client) {
+          await client.commit();
+          this.getTenantSdkPool().release(client);
+          this.activeTransactionClients.delete(txKey);
+        }
       }
       // SQL API: intentional no-op
       this.inTransaction = false;
-      logDebug('transaction committed', { mode: this.sdkClient ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
+      logDebug('transaction committed', { mode: this.sdkPool ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
     } catch (error) {
       logError('Failed to commit transaction', error);
       throw normalizeError(error);
@@ -714,12 +810,18 @@ export class SnowflakeService extends cds.DatabaseService {
     }
 
     try {
-      if (this.sdkClient) {
-        await this.sdkClient.rollback();
+      if (this.sdkPool) {
+        const txKey = cds.context?.id ?? 'default';
+        const client = this.activeTransactionClients.get(txKey);
+        if (client) {
+          await client.rollback();
+          this.getTenantSdkPool().release(client);
+          this.activeTransactionClients.delete(txKey);
+        }
       }
       // SQL API: intentional no-op
       this.inTransaction = false;
-      logDebug('transaction rolled back', { mode: this.sdkClient ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
+      logDebug('transaction rolled back', { mode: this.sdkPool ? 'sdk' : 'sql-api (auto-commit)', contextId: cds.context?.id ?? 'default' });
     } catch (error) {
       logError('Failed to rollback transaction', error);
       throw normalizeError(error);
@@ -727,14 +829,46 @@ export class SnowflakeService extends cds.DatabaseService {
   }
 
   /**
-   * Disconnect
+   * Disconnect.
+   *
+   * When called with a tenant ID (by MTX on tenant unsubscribe) only that
+   * tenant's connection pool is drained, leaving all other tenants running.
+   * When called without arguments the full adapter is shut down.
    */
-  async disconnect(): Promise<void> {
+  async disconnect(tenant?: string): Promise<void> {
     try {
-      if (this.sdkClient) {
-        await this.sdkClient.disconnect();
-        logInfo('Disconnected from Snowflake');
+      if (tenant) {
+        // Tenant-specific teardown (MTX unsubscribe path):
+        // 1. Drain SDK pool for this tenant
+        const pool = this.tenantSdkPools.get(tenant);
+        if (pool) {
+          await pool.destroyAll();
+          this.tenantSdkPools.delete(tenant);
+          logInfo(`Disconnected tenant SDK pool: ${tenant}`);
+        }
+        // 2. Drop the tenant schema (equivalent to dropping an HDI container in HANA).
+        //    This permanently removes all tenant data — only called on unsubscribe.
+        if (this.isMultitenant) {
+          const tenantSchema = this.resolveTenantSchema(tenant);
+          const dbPrefix = this.credentials.database
+            ? `${toPhysicalIdentifier(this.credentials.database)}.`
+            : '';
+          await this.execute(
+            `DROP SCHEMA IF EXISTS ${dbPrefix}${toPhysicalIdentifier(tenantSchema)} CASCADE`
+          );
+          logInfo(`Dropped tenant schema: ${tenantSchema}`, { tenant });
+        }
+        return;
       }
+      // Full shutdown
+      if (this.sdkPool) {
+        await this.sdkPool.destroyAll();
+      }
+      for (const pool of this.tenantSdkPools.values()) {
+        await pool.destroyAll().catch(() => { /* ignore shutdown errors */ });
+      }
+      this.tenantSdkPools.clear();
+      logInfo('Disconnected from Snowflake');
     } catch (error) {
       logError('Failed to disconnect', error);
       throw normalizeError(error);
@@ -792,7 +926,7 @@ export class SnowflakeService extends cds.DatabaseService {
 
     const { qualifyName: qualify } = await import('./identifiers.js');
     const tableName: string = entityDef['@cds.persistence.name'] ?? entity.replace(/\./g, '_').toUpperCase();
-    const qualifiedTable = qualify(tableName, this.credentials);
+    const qualifiedTable = qualify(tableName, this.getEffectiveCredentials());
 
     const vecLiteral = `[${queryVector.join(',')}]::VECTOR(FLOAT, ${queryVector.length})`;
     const fnMap: Record<string, string> = {
@@ -822,7 +956,25 @@ export class SnowflakeService extends cds.DatabaseService {
       throw new Error('Deploy requires a CDS model');
     }
 
-    const statements = buildDeployStatements(model, this.credentials, {
+    const effectiveCreds = this.getEffectiveCredentials();
+
+    // Multitenancy: ensure the tenant schema exists before deploying tables into it.
+    // CAP's MTX sidecar calls deploy() once per tenant with cds.context.tenant set.
+    if (this.isMultitenant) {
+      const tenant = (cds.context as any)?.tenant;
+      if (tenant) {
+        const tenantSchema = this.resolveTenantSchema(tenant);
+        const dbPrefix = effectiveCreds.database
+          ? `${toPhysicalIdentifier(effectiveCreds.database)}.`
+          : '';
+        await this.execute(
+          `CREATE SCHEMA IF NOT EXISTS ${dbPrefix}${toPhysicalIdentifier(tenantSchema)}`
+        );
+        logInfo(`Created/verified tenant schema: ${tenantSchema}`, { tenant });
+      }
+    }
+
+    const statements = buildDeployStatements(model, effectiveCreds, {
       createViews: options?.createViews !== false
     });
 
