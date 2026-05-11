@@ -90,8 +90,8 @@ Register additional named services in the same way and connect to them independe
 {
   "cds": {
     "requires": {
-      "snowflake-mart":    { "kind": "snowflake", "impl": "node_modules/cap-snowflake" },
-      "snowflake-archive": { "kind": "snowflake", "impl": "node_modules/cap-snowflake" }
+      "snowflake-mart":    { "kind": "snowflake", "impl": "cap-snowflake" },
+      "snowflake-archive": { "kind": "snowflake", "impl": "cap-snowflake" }
     }
   }
 }

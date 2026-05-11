@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@sap/cds": "^9",
-    "cap-snowflake": "github:sleibach/cap-snowflake",
+    "cap-snowflake": "^1.0.0",
     "express": "^4"
   },
   "devDependencies": {
@@ -19,7 +19,7 @@
     "requires": {
       "db": {
         "kind": "snowflake",
-        "impl": "node_modules/cap-snowflake"
+        "impl": "cap-snowflake"
       }
     },
     "[development]": {

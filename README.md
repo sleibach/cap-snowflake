@@ -3,7 +3,8 @@
 SAP CAP database adapter for Snowflake — OData V4 support for the SAP Cloud Application Programming / CDS Model.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](package.json)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](package.json)
+[![npm version](https://img.shields.io/npm/v/cap-snowflake.svg)](https://www.npmjs.com/package/cap-snowflake)
 
 > **Early Development Notice**
 >
@@ -82,7 +83,7 @@ The one pragmatic exception is cost consolidation: if Snowflake is already the o
 
 ## Prerequisites
 
-- Node.js 18 or later
+- Node.js 20 or later
 - SAP CAP (`@sap/cds`) 7.0 or later
 - A Snowflake account with a dedicated user, role, warehouse, database, and schema
 
@@ -91,8 +92,17 @@ The one pragmatic exception is cost consolidation: if Snowflake is already the o
 ## Installation
 
 ```bash
-npm install github:sleibach/cap-snowflake
+npm install cap-snowflake
 ```
+
+Or pin to an exact version (recommended while the API is still under active development — see the notice at the top of this README):
+
+```bash
+npm install cap-snowflake@1.0.0
+```
+
+**Source:** [github.com/sleibach/cap-snowflake](https://github.com/sleibach/cap-snowflake)
+**npm:** [npmjs.com/package/cap-snowflake](https://www.npmjs.com/package/cap-snowflake)
 
 ---
 
@@ -111,18 +121,20 @@ Use this when Snowflake is the sole persistence layer for the application.
 ```json
 {
   "dependencies": {
-    "cap-snowflake": "github:sleibach/cap-snowflake"
+    "cap-snowflake": "^1.0.0"
   },
   "cds": {
     "requires": {
       "db": {
         "kind": "snowflake",
-        "impl": "node_modules/cap-snowflake"
+        "impl": "cap-snowflake"
       }
     }
   }
 }
 ```
+
+> The plugin self-registers via the `cds-plugin.js` convention, so the `impl` line is only required if you want to be explicit (and if so, prefer the bare module name `"cap-snowflake"` over a path into `node_modules/`).
 
 **Credentials** — `~/.cdsrc.json` (local dev) or a bound user-provided service on BTP/CF:
 
@@ -166,14 +178,14 @@ The more common real-world scenario is using Snowflake as an **analytics / repor
 {
   "dependencies": {
     "@cap-js/hana": "^2",
-    "cap-snowflake": "github:sleibach/cap-snowflake"
+    "cap-snowflake": "^1.0.0"
   },
   "cds": {
     "requires": {
       "db": { "kind": "hana" },
       "snowflake": {
         "kind": "snowflake",
-        "impl": "node_modules/cap-snowflake"
+        "impl": "cap-snowflake"
       }
     }
   }
