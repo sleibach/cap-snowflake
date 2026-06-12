@@ -2,11 +2,25 @@ src/
 test/
 examples/
 .github/
+.claude/
 tsconfig.json
 .eslintrc.json
 *.log
 .env
+.env.*
 .DS_Store
 *.test.ts
 *.test.js
+
+# Sensitive key files — must never be published
+*.p8
+*.pub
+snowflake_key.*
+
+# Development/internal files
+CLAUDE.md
+CONTRIBUTING.md
+inspect-model.cjs
+inspect-model.js
+ui5.yaml
 
