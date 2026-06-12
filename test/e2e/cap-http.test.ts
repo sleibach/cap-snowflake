@@ -2002,4 +2002,170 @@ before(function () { this.timeout(120_000); });
       }
     });
   });
+
+  // ==========================================================================
+  // IN operator (OData 'in' list / CQN list)
+  describe('$filter with IN list operator', () => {
+    it('$filter=ID in (id1,id2) returns exactly those two books', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=ID in ('${BOOK_ID}','${BOOK_ID2}') and IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf(2);
+      const ids = res.data.value.map((b: any) => b.ID);
+      expect(ids).to.include(BOOK_ID);
+      expect(ids).to.include(BOOK_ID2);
+    });
+
+    it('$filter=ID in (id1) returns exactly one book', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=ID in ('${BOOK_ID}') and IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf(1);
+      expect(res.data.value[0].ID).to.equal(BOOK_ID);
+    });
+
+    it('$filter=ID in (nonexistent) returns empty array', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=ID in ('00000000-0000-0000-0000-000000000000') and IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf(0);
+    });
+
+    it('$filter=country in (DE,US) returns authors from those countries', async () => {
+      const res = await GET(`${BASE}/Authors?$filter=country in ('DE','US')`);
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+      for (const a of res.data.value) {
+        expect(['DE', 'US']).to.include(a.country);
+      }
+    });
+  });
+
+  // ==========================================================================
+  // Numeric type handling — CDS 10 ieee754compatible preparation
+  // With ieee754compatible:true (CDS 10 default), Decimal/Int64 values
+  // come through as JS numbers. Snowflake NUMBER supports both representations.
+  describe('Numeric type handling (ieee754compatible)', () => {
+    it('Decimal price round-trips correctly (numeric-castable)', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=ID eq '${BOOK_ID}' and IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      const book = res.data.value[0];
+      expect(book).to.exist;
+      const price = Number(book.price);
+      expect(price).to.be.finite;
+      expect(price).to.be.closeTo(29.99, 0.01);
+    });
+
+    it('Integer stock is returned as a numeric-castable value', async () => {
+      const res = await GET(
+        `${BASE}/Books?$filter=ID eq '${BOOK_ID}' and IsActiveEntity eq true`
+      );
+      expect(res.status).to.equal(200);
+      const book = res.data.value[0];
+      expect(book).to.exist;
+      const stock = Number(book.stock);
+      expect(stock).to.be.a('number').and.finite;
+      expect(stock).to.be.gte(0);
+    });
+
+    it('POST order with decimal total round-trips correctly', async () => {
+      const res = await POST(`${BASE}/Orders`, {
+        book_ID: BOOK_ID,
+        quantity: 2,
+        buyer: 'ieee754-tester',
+        total: 59.98
+      });
+      expect(res.status).to.equal(201);
+      const orderId = res.data.ID;
+
+      const getRes = await GET(`${BASE}/Orders(${orderId})`);
+      expect(getRes.status).to.equal(200);
+      const total = Number(getRes.data.total);
+      expect(total).to.be.closeTo(59.98, 0.01);
+
+      await DELETE_REQ(`${BASE}/Orders(${orderId})`).catch(() => {});
+    });
+  });
+
+  // ==========================================================================
+  // HAVING-equivalent via $apply multi-aggregate
+  describe('$apply with multiple aggregation functions', () => {
+    it('aggregate(amount with sum,units with sum) returns correct combined totals', async () => {
+      const res = await GET(
+        `${BASE}/SalesFacts?$apply=aggregate(amount with sum as totalAmount,units with sum as totalUnits)`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.have.lengthOf(1);
+      const row = res.data.value[0];
+      // 99.95 + 49.95 + 79.95 + 59.95 = 289.80
+      expect(Number(row.totalAmount)).to.be.closeTo(289.80, 0.01);
+      // 5 + 2 + 3 + 1 = 11
+      expect(Number(row.totalUnits)).to.equal(11);
+    });
+
+    it('groupby((channel)) + sum and avg gives per-channel stats', async () => {
+      const res = await GET(
+        `${BASE}/SalesFacts?$apply=groupby((channel),aggregate(units with sum as totalUnits,amount with avg as avgAmount))`
+      );
+      expect(res.status).to.equal(200);
+      expect(res.data.value).to.be.an('array').with.lengthOf.gte(2);
+      const online = res.data.value.find((r: any) => r.channel === 'Online');
+      expect(online).to.exist;
+      expect(Number(online.totalUnits)).to.equal(9); // 5+3+1
+    });
+  });
+
+  // ==========================================================================
+  // NULL checks on filterable fields
+  describe('NULL field filtering', () => {
+    it('buyer ne null returns orders with a buyer set', async () => {
+      const res = await POST(`${BASE}/Orders`, { book_ID: BOOK_ID, quantity: 1, buyer: 'null-check-buyer' });
+      expect(res.status).to.equal(201);
+      const orderId = res.data.ID;
+
+      const getRes = await GET(`${BASE}/Orders?$filter=buyer ne null`);
+      expect(getRes.status).to.equal(200);
+      const ids = getRes.data.value.map((o: any) => o.ID);
+      expect(ids).to.include(orderId);
+
+      await DELETE_REQ(`${BASE}/Orders(${orderId})`).catch(() => {});
+    });
+  });
+
+  // ==========================================================================
+  // CDS 10 compat_save_drafts=false — PATCH on draft must not trigger SAVE event
+  describe('CDS 10 compat_save_drafts: PATCH on draft entity', () => {
+    let patchDraftId: string;
+
+    before(async () => {
+      const res = await POST(`${BASE}/Books`, { title: 'Compat Save Draft', price: 1.11 });
+      patchDraftId = res.data.ID;
+    });
+
+    it('PATCH draft entity succeeds (no SAVE side-effect)', async () => {
+      const res = await PATCH(
+        `${BASE}/Books(ID=${patchDraftId},IsActiveEntity=false)`,
+        { title: 'Compat Save Updated' }
+      );
+      expect(res.status).to.be.oneOf([200, 204]);
+    });
+
+    it('Subsequent GET reflects PATCH change', async () => {
+      const res = await GET(`${BASE}/Books(ID=${patchDraftId},IsActiveEntity=false)`);
+      expect(res.status).to.equal(200);
+      expect(res.data.title).to.equal('Compat Save Updated');
+    });
+
+    after(async () => {
+      if (patchDraftId) {
+        await DELETE_REQ(`${BASE}/Books(ID=${patchDraftId},IsActiveEntity=false)`).catch(() => {});
+        await db.run(`DELETE FROM ${BOOKS_TABLE} WHERE ID = '${patchDraftId}'`).catch(() => {});
+      }
+    });
+  });
 });

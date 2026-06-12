@@ -7,6 +7,9 @@
         "kind": "snowflake",
         "impl": "../../../dist/index.js"
       }
+    },
+    "features": {
+      "ieee754compatible": true
     }
   },
   "dependencies": {
